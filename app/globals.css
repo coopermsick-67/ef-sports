@@ -316,6 +316,31 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .health-warnings p { display: flex; gap: 8px; color: #d9be9b; font-size: 12px; }
 .health-warnings svg { flex: none; }
 .toast { position: fixed; z-index: 40; right: 23px; bottom: 22px; display: flex; align-items: center; gap: 9px; padding: 11px 15px; border: 1px solid #a5d064; border-radius: 6px; background: #21332b; box-shadow: 0 15px 35px #0007; color: #edffd1; font-size: 13px; }
+.target-options,.featured-sports { display: flex; flex-wrap: wrap; gap: 9px; }
+.target-options .select-chip { min-width: 75px; }
+.featured-sports { margin: 4px 0 18px; }
+.featured-sports .select-chip { display: flex; align-items: center; gap: 11px; min-width: 102px; justify-content: space-between; }
+.featured-sports .select-chip span { color: #aab9c8; font-size: 11px; }
+.featured-layout { display: grid; grid-template-columns: minmax(280px,.72fr) minmax(0,1.28fr); gap: 17px; }
+.featured-game-list,.featured-combos { padding: 20px; min-width: 0; }
+.featured-game-list .section-heading,.featured-combos .section-heading { margin-bottom: 15px; }
+.featured-game-list .section-heading { align-items: flex-start; flex-direction: column; gap: 3px; }
+.featured-combos .section-heading { align-items: flex-start; }
+.featured-combos .section-heading h2 { line-height: 1.2; }
+.featured-combos .section-heading p { margin: 6px 0 0; color: #9fadbf; font-size: 12px; }
+.featured-combo-list { display: grid; gap: 11px; }
+.featured-combo { border: 1px solid #34485b; border-radius: 6px; background: #142333; padding: 15px; }
+.featured-combo-top,.featured-combo-actions { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.featured-combo-top strong { color: #d1ff79; font-size: 15px; }
+.featured-combo-top span { color: #e8f2dc; font-weight: 650; }
+.featured-combo-legs { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin: 14px 0; }
+.featured-combo-legs > div { min-width: 0; padding-left: 12px; border-left: 2px solid #708954; }
+.featured-combo-legs span,.featured-combo-legs small { display: block; overflow-wrap: anywhere; }
+.featured-combo-legs span { color: #f2f7fc; font-weight: 650; }
+.featured-combo-legs small { margin-top: 4px; color: #a9b8ca; font-size: 12px; line-height: 1.35; }
+.featured-combo-actions { border-top: 1px solid #2b4053; padding-top: 11px; color: #a9b8ca; font-size: 11px; }
+.featured-combo-actions .secondary-button { min-height: 34px; padding: 0 11px; }
+.featured-note { margin: 17px 0 0; color: #a8b7c8; font-size: 12px; line-height: 1.5; }
 .spin { animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 1220px) {
@@ -330,7 +355,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .venue-chip { flex: 1 1 135px; }
 }
 @media (max-width: 980px) {
-  .generator-grid,.dashboard-grid,.games-layout { grid-template-columns: 1fr; }
+  .generator-grid,.dashboard-grid,.games-layout,.featured-layout { grid-template-columns: 1fr; }
   .generator-panel,.combo-panel { min-height: 0; }
   .combo-panel > .empty-state { min-height: 225px; }
   .metric-grid { grid-template-columns: repeat(2,1fr); }
@@ -375,5 +400,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .health-summary,.method-grid { grid-template-columns: 1fr; }
   .source-row { gap: 8px; }
   .source-status { display: none; }
+  .featured-game-list,.featured-combos { padding: 16px; }
+  .featured-combo-legs { grid-template-columns: 1fr; }
+  .featured-combo-top { align-items: flex-start; flex-direction: column; }
 }
 @media (prefers-reduced-motion: reduce) { *,*:before,*:after { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }

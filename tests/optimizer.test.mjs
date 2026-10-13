@@ -56,7 +56,7 @@ function catalog(markets, games = []) {
   return { markets, games, sources: [], fetchedAt, warnings: [] };
 }
 function run(markets, overrides = {}, games = []) {
-  return optimizeCombos(catalog(markets, games), { ...request, ...overrides }, { now });
+  return optimizeCombos(catalog(markets, games), { ...request, minReferencePayout: 1, ...overrides }, { now });
 }
 const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-10, `${actual} ≠ ${expected}`);
 
@@ -71,10 +71,11 @@ test("normalized binary midpoint probabilities and dependence bounds", () => {
   assert.throws(() => frechetBounds([Number.NaN]), RangeError);
 });
 
-test("selects highest probability irrespective of price, payout, or an edge target", () => {
-  const result = run([market("high", 0.85), market("middle", 0.75), market("cheap", 0.55)]);
-  assert.deepEqual(result.combos[0].legs.map((leg) => leg.marketId).sort(), ["high", "middle"]);
-  close(result.combos[0].probability, 0.85 * 0.75);
+test("payout floor chooses a lower-chance combination with a meaningful reference multiplier", () => {
+  const result = run([market("high", 0.85), market("middle", 0.75), market("cheap", 0.55)], { minReferencePayout: 3 });
+  assert.ok(result.combos[0].probability < 0.85 * 0.75);
+  assert.ok(result.combos[0].referenceGrossMultiplier >= 3);
+  close(result.combos[0].referenceBreakEven, result.combos[0].legs.reduce((price, leg) => price * leg.entryPrice, 1));
   assert.equal(result.combos[0].estimatedReturn, null);
   assert.equal(result.combos[0].executableQuote, null);
   assert.equal(result.combos[0].modelStatus, "unavailable");
@@ -103,6 +104,12 @@ test("removes stale, closed, completed, and duplicate data before ranking", () =
   assert.equal(result.diagnostics.rejected["stale-market"], 1);
   assert.equal(result.diagnostics.rejected["finished-game"], 1);
   assert.equal(result.diagnostics.rejected["duplicate-market"], 1);
+});
+
+test("live games are excluded from pregame combo research", () => {
+  const result = run([market("live", 0.6), market("scheduled", 0.6)], { legs: 1 }, [{ id: "game-live", status: "live" }]);
+  assert.equal(result.combos[0].legs[0].marketId, "scheduled");
+  assert.equal(result.diagnostics.rejected["game-not-scheduled"], 1);
 });
 
 test("one canonical game across venues yields only one leg", () => {
@@ -181,40 +188,58 @@ test("spread, liquidity, games, categories, and excluded selection filters work"
   close(result.combos[0].probability, 0.2);
 });
 
-test("repeated-team dependence is disclosed with mathematical bounds", () => {
+test("repeated teams across dates are excluded from the independence screen", () => {
   const result = run([
     market("today", 0.8, { teams: ["Dodgers", "Padres"] }),
     market("tomorrow", 0.7, { startsAt: "2026-10-15T00:00:00Z", teams: ["Dodgers", "Mets"] }),
   ]);
-  assert.deepEqual(result.combos[0].repeatedTeams, ["Dodgers"]);
-  assert.ok(result.combos[0].warnings.some((warning) => warning.includes("Shared form")));
-  close(result.combos[0].lowerBound, 0.5);
-  close(result.combos[0].upperBound, 0.7);
+  assert.equal(result.combos.length, 0);
+  const bounds = frechetBounds([0.8, 0.7]);
+  close(bounds.lowerBound, 0.5);
+  close(bounds.upperBound, 0.7);
 });
 
-test("exact top-three dynamic programming agrees with exhaustive enumeration", () => {
-  // Overlapping markets per game make naive top-leg selection invalid. Check the full top-k.
+test("payout-constrained search respects the floor and distinct games", () => {
   for (let seed = 1; seed <= 12; seed++) {
     let value = seed;
     const random = () => { value = (value * 48271) % 2147483647; return value / 2147483647; };
     const markets = Array.from({ length: 12 }, (_, i) => market(`m-${i}`, 0.1 + random() * 0.8, { gameId: `g-${Math.floor(i / 2)}` }));
-    const result = run(markets, { legs: 3 });
-    const groups = new Map();
-    for (const item of markets) {
-      const p = estimateBinaryMarket(item).yes;
-      groups.set(item.gameId, [...(groups.get(item.gameId) ?? []), p, 1 - p]);
+    const result = run(markets, { legs: 3, minReferencePayout: 5 });
+    for (const combo of result.combos) {
+      assert.ok(combo.referenceGrossMultiplier >= 5 - 1e-10);
+      assert.equal(new Set(combo.legs.map((leg) => leg.gameId)).size, 3);
     }
-    const all = [];
-    function visit(entries, index, count, product) {
-      if (count === 3) { all.push(product); return; }
-      if (index === entries.length) return;
-      visit(entries, index + 1, count, product);
-      for (const p of entries[index]) visit(entries, index + 1, count + 1, product * p);
-    }
-    visit([...groups.values()], 0, 0, 1);
-    all.sort((a, b) => b - a);
-    result.combos.forEach((combo, index) => close(combo.probability, all[index]));
   }
+});
+
+test("anchored game combos include the selected matchup and another game", () => {
+  const result = run([market("A", 0.58), market("B", 0.6), market("C", 0.7)], { anchorGameId: "game-A", minReferencePayout: 3 });
+  assert.ok(result.combos.length > 0);
+  for (const combo of result.combos) {
+    assert.ok(combo.legs.some((leg) => leg.gameId === "game-A"));
+    assert.equal(new Set(combo.legs.map((leg) => leg.gameId)).size, 2);
+  }
+  const missing = run([market("B", 0.6)], { anchorGameId: "game-A" });
+  assert.equal(missing.combos.length, 0);
+});
+
+test("missing ask and wide spreads cannot pass the payout screen", () => {
+  const result = run([
+    market("missing", 0.6, { yesAsk: null, noAsk: null }),
+    market("wide", 0.6, { yesBid: 0.4, yesAsk: 0.6, noBid: 0.4, noAsk: 0.6 }),
+  ], { legs: 1 });
+  assert.equal(result.combos.length, 0);
+  assert.ok((result.diagnostics.rejected["unavailable-probability"] ?? 0) + (result.diagnostics.rejected["unavailable-ask"] ?? 0) > 0);
+  assert.ok((result.diagnostics.rejected["wide-spread"] ?? 0) > 0);
+});
+
+test("payout screen avoids a near-certain filler leg", () => {
+  const result = run([market("filler", 0.99), market("balanced-a", 0.58), market("balanced-b", 0.52)], { minReferencePayout: 3 });
+  for (const combo of result.combos) {
+    assert.ok(combo.legs.every((leg) => leg.probability <= 0.8));
+    assert.ok(combo.legs.every((leg) => leg.probability >= 0.2));
+  }
+  assert.ok((result.diagnostics.rejected["extreme-single-leg-proxy"] ?? 0) > 0);
 });
 
 test("POST handler validates dates, sports, and the ten-leg maximum", async () => {
@@ -242,10 +267,10 @@ test("POST returns ranked research combinations and explicitly no executable quo
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("Cache-Control"), "no-store");
   const result = await response.json();
-  close(result.combos[0].probability, 0.56);
+  assert.ok(result.combos[0].referenceGrossMultiplier >= 3);
   assert.equal(result.combos[0].executableQuote, null);
   assert.equal(result.combos[0].hypothetical, true);
-  assert.equal(result.diagnostics.ranking, "winning-probability");
+  assert.equal(result.diagnostics.ranking, "payout-constrained-market-proxy");
 });
 
 test("POST provider failures and invalid JSON never return fabricated selections", async () => {

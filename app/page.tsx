@@ -12,19 +12,20 @@ import { SPORTS } from "../lib/types";
 import type { Catalog, Game, Market, MarketCategory, SourceStatus, Sport, Venue } from "../lib/types";
 import type { Combo, ComboResult } from "../lib/optimizer";
 
-type View = "dashboard" | "generator" | "scanner" | "games" | "players" | "saved" | "health";
+type View = "dashboard" | "generator" | "game-combos" | "scanner" | "games" | "players" | "saved" | "health";
 type SaveStatus = "research" | "paper-open" | "paper-won" | "paper-lost";
 type StorageMode = "checking" | "account" | "browser";
 interface SavedItem { id: string; combo: Combo; status: SaveStatus; stake: number; entryCost: number | null; savedAt: string; updatedAt: string }
 const NAV: { id: View; label: string; icon: LucideIcon }[] = [
   { id: "dashboard", label: "Dashboard", icon: Home },
   { id: "generator", label: "Combo generator", icon: Waypoints },
+  { id: "game-combos", label: "Game combos", icon: Ticket },
   { id: "scanner", label: "Market scanner", icon: Search },
   { id: "games", label: "Game analysis", icon: BarChart3 },
   { id: "players", label: "Player research", icon: UserRound },
   { id: "saved", label: "Saved combos", icon: Bookmark },
 ];
-const LABELS: Record<View, string> = { dashboard: "Dashboard", generator: "Combo generator", scanner: "Market scanner", games: "Game analysis", players: "Player research", saved: "Saved combos", health: "Settings & data health" };
+const LABELS: Record<View, string> = { dashboard: "Dashboard", generator: "Combo generator", "game-combos": "Game combos", scanner: "Market scanner", games: "Game analysis", players: "Player research", saved: "Saved combos", health: "Settings & data health" };
 const VENUES: { id: Venue; label: string }[] = [
   { id: "kalshi", label: "Kalshi" }, { id: "polymarket-us", label: "Polymarket US" },
   { id: "polymarket-global", label: "Global (read-only)" },
@@ -50,6 +51,7 @@ function when(iso: string, time = true) {
 function pct(value: number | null | undefined) { return typeof value === "number" && Number.isFinite(value) ? (value * 100).toFixed(1) + "%" : "—"; }
 function cents(value: number | null | undefined) { return typeof value === "number" && Number.isFinite(value) ? Math.round(value * 100) + "¢" : "—"; }
 function compact(value: number | null | undefined) { return typeof value === "number" && Number.isFinite(value) ? new Intl.NumberFormat("en-US", { notation: "compact" }).format(value) : "—"; }
+function multiple(value: number | null | undefined) { return typeof value === "number" && Number.isFinite(value) ? Number(value.toFixed(2)).toString() + "×" : "—"; }
 function venueName(value: Venue) { return VENUES.find((item) => item.id === value)?.label ?? value; }
 function legEvent(leg: Combo["legs"][number], games: Game[] = []) {
   return (leg.gameId ? games.find((game) => game.id === leg.gameId)?.title : undefined)
@@ -75,6 +77,12 @@ export default function HomePage() {
   const [start, setStart] = useState(today);
   const [end, setEnd] = useState(plusDays(today, 6));
   const [legs, setLegs] = useState(3);
+  const [payoutTarget, setPayoutTarget] = useState(3);
+  const [featuredSport, setFeaturedSport] = useState<Sport>("MLB");
+  const [featuredGameId, setFeaturedGameId] = useState<string | null>(null);
+  const [featuredResult, setFeaturedResult] = useState<ComboResult | null>(null);
+  const [featuredBusy, setFeaturedBusy] = useState(false);
+  const [featuredError, setFeaturedError] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [categories, setCategories] = useState<MarketCategory[]>([]);
   const [minLiquidity, setMinLiquidity] = useState("");
@@ -153,7 +161,7 @@ export default function HomePage() {
     setGenerateBusy(true);
     try {
       const body = {
-        sports, start, end, venue, legs, stake: Number(stake) || 0, requireEachSport,
+        sports, start, end, venue, legs, stake: Number(stake) || 0, requireEachSport, minReferencePayout: payoutTarget,
         ...(categories.length ? { marketCategories: categories } : {}),
         ...(minLiquidity !== "" ? { minLiquidity: Number(minLiquidity) } : {}),
         ...(maxSpread !== "" ? { maxSpread: Number(maxSpread) / 100 } : {}),
@@ -219,6 +227,26 @@ export default function HomePage() {
           : sort === "name" ? a.title.localeCompare(b.title) : a.startsAt.localeCompare(b.startsAt));
   }, [catalog, search, scannerCategory, sort]);
   const games = useMemo(() => (catalog?.games ?? []).filter((game) => game.status === "scheduled" || game.status === "live").sort((a, b) => a.startsAt.localeCompare(b.startsAt)), [catalog]);
+  const featuredGames = useMemo(() => games.filter((game) => game.sport === featuredSport && game.status === "scheduled"), [games, featuredSport]);
+  const featuredGame = featuredGames.find((game) => game.id === featuredGameId) ?? featuredGames[0];
+  useEffect(() => {
+    if (view !== "game-combos" || !featuredGame || venue === "polymarket-global") return;
+    const controller = new AbortController();
+    const load = async () => {
+      setFeaturedBusy(true); setFeaturedError(""); setFeaturedResult(null);
+      try {
+        const body = { sports: [featuredSport], start, end, venue, legs: 2, minReferencePayout: 3, anchorGameId: featuredGame.id };
+        const response = await fetch("/api/combos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), cache: "no-store", signal: controller.signal });
+        const data = await json(response);
+        if (!response.ok) throw new Error(message(data, "Could not prepare game combos."));
+        setFeaturedResult(data as ComboResult);
+      } catch (error) {
+        if (!controller.signal.aborted) setFeaturedError(error instanceof Error ? error.message : "Could not prepare game combos.");
+      } finally { if (!controller.signal.aborted) setFeaturedBusy(false); }
+    };
+    void load();
+    return () => controller.abort();
+  }, [view, featuredSport, featuredGame?.id, venue, start, end, catalog?.fetchedAt]);
   const combo = result?.combos[comboIndex] ?? null;
   const dataFresh = fresh(catalog?.fetchedAt);
   const playerMarkets = (catalog?.markets ?? []).filter((market) => market.category === "player-prop");
@@ -234,14 +262,15 @@ export default function HomePage() {
       <header className="topbar"><div className="topbar-left"><button className="mobile-menu-button" aria-label="Open navigation" onClick={() => setMenuOpen(true)}><Menu size={21} /></button><span className="breadcrumb-muted">Workspace</span><span className="breadcrumb-slash">/</span><span>{LABELS[view]}</span></div><div className="topbar-actions">{catalog && <span className={"freshness" + (dataFresh ? " fresh" : "")}><span className="freshness-dot" />{dataFresh ? "Current snapshot" : "Snapshot aging"}</span>}<button className="refresh-button" onClick={refresh} disabled={catalogBusy}><RefreshCw size={17} className={catalogBusy ? "spin" : ""} /><span>{catalogBusy ? "Refreshing" : "Refresh data"}</span></button></div></header>
       <main className="workspace">
         {view === "generator" && <>
-          <Intro title="Build a smarter combo." copy="Start with the probability. Choose your sports, games, and dates." aside="Research only" />
+          <Intro title="Build a smarter combo." copy="Set a payout target, then find the strongest market-implied chance that reaches it." aside="Research only" />
           <div className="generator-grid">
             <section className="panel generator-panel"><h2>Find your next combination</h2>
               <div className="form-block"><label className="field-label">Prediction market venue</label><div className="venue-options">{VENUES.map((item) => <button key={item.id} className={"select-chip venue-chip" + (venue === item.id ? " selected" : "")} onClick={() => { setVenue(item.id); setResult(null); }}>{item.label}</button>)}</div><p className="field-hint">Global markets are read-only and cannot be added to combos.</p></div>
               <div className="form-block"><div className="field-label-row"><label className="field-label">Sports</label><button className="text-action" onClick={() => { setSports(sports.length === SPORTS.length ? [] : [...SPORTS]); setResult(null); }}>{sports.length === SPORTS.length ? "Clear all" : "Select all"}</button></div><div className="sport-options">{SPORTS.map((sport) => <button key={sport} aria-pressed={sports.includes(sport)} className={"select-chip sport-chip" + (sports.includes(sport) ? " selected" : "")} onClick={() => toggleSport(sport)}>{sport}</button>)}</div></div>
               <div className="date-grid"><label><span className="field-label">Start date</span><span className="input-wrap"><CalendarDays size={18} /><input type="date" value={start} onChange={(event) => { setStart(event.target.value); setResult(null); }} aria-label="Start date" /></span></label><label><span className="field-label">End date</span><span className="input-wrap"><CalendarDays size={18} /><input type="date" value={end} min={start} onChange={(event) => { setEnd(event.target.value); setResult(null); }} aria-label="End date" /></span></label></div>
               <div className="form-block legs-block"><label className="field-label">Number of legs</label><div className="leg-options">{Array.from({ length: 10 }, (_, n) => n + 1).map((count) => <button key={count} aria-pressed={legs === count} className={"select-chip leg-chip" + (legs === count ? " selected" : "")} onClick={() => { setLegs(count); setResult(null); }}>{count}</button>)}</div></div>
-              <p className="optimization-note"><Info size={17} />Optimized for the highest estimated chance of winning, with no minimum probability cutoff.</p>
+              <div className="form-block"><label className="field-label">Standalone-ask payout target</label><div className="target-options">{[2.5, 3, 5, 8].map((target) => <button key={target} aria-pressed={payoutTarget === target} className={"select-chip" + (payoutTarget === target ? " selected" : "")} onClick={() => { setPayoutTarget(target); setResult(null); }}>{multiple(target)}</button>)}</div></div>
+              <p className="optimization-note"><Info size={17} />A payout reference from individual asks sets the difficulty. No combo price or positive edge is implied.</p>
               <div className="filters"><button className="filters-toggle" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(!filtersOpen)}><span><SlidersHorizontal size={20} />Market filters{categories.length + gameIds.length > 0 && <em>{categories.length + gameIds.length} active</em>}</span><ChevronDown size={19} className={filtersOpen ? "rotated" : ""} /></button>{filtersOpen && <div className="filters-body">
                 <div className="filter-group"><div className="field-label-row"><label className="field-label">Market categories</label><button className="text-action" onClick={() => setCategories([])}>Any category</button></div><div className="category-options">{CATEGORIES.map((category) => <button key={category.id} className={"small-chip" + (categories.includes(category.id) ? " selected" : "")} onClick={() => toggleCategory(category.id)}>{category.label}</button>)}</div></div>
                 <div className="filter-number-grid"><label><span className="field-label">Minimum liquidity</span><span className="input-wrap small-input"><b>$</b><input type="number" min="0" step="1" placeholder="Any" value={minLiquidity} onChange={(event) => setMinLiquidity(event.target.value)} /></span></label><label><span className="field-label">Maximum spread</span><span className="input-wrap small-input"><input type="number" min="0" max="100" step="0.1" placeholder="Any" value={maxSpread} onChange={(event) => setMaxSpread(event.target.value)} /><b>¢</b></span></label><label><span className="field-label">Research stake</span><span className="input-wrap small-input"><b>$</b><input type="number" min="0" step="1" value={stake} onChange={(event) => setStake(event.target.value)} /></span></label></div>
@@ -253,26 +282,37 @@ export default function HomePage() {
               {venue === "polymarket-global" && <p className="field-hint global-note">Select Kalshi or Polymarket US to generate. Global markets remain visible in the scanner.</p>}
             </section>
             <section className="panel combo-panel"><h2>Your combo</h2>{generateBusy ? <Empty icon={Activity} title="Evaluating available contracts" copy="Checking current markets against your sports, dates, and leg count." /> : combo ? <div className="combo-result">
-              <div className="combo-result-header"><span className="result-kicker">RANK #{combo.rank} · {combo.legs.length} LEGS</span><strong>{pct(combo.probability)}</strong></div><h3>Highest estimated win probability</h3><p className="basis-label">Market-implied independence estimate</p>
+              <div className="combo-result-header"><span className="result-kicker">RANK #{combo.rank} · {combo.legs.length} LEGS</span><strong>{pct(combo.probability)}</strong></div><h3>Best chance above {multiple(payoutTarget)}</h3><p className="basis-label">Market-implied independence estimate</p>
               <div className="combo-leg-list">{combo.legs.map((leg, n) => <div className="combo-leg" key={leg.id}><span className="leg-index">{String(n + 1).padStart(2, "0")}</span><div><strong>{leg.selection}</strong><span className="event-title">{legEvent(leg, catalog?.games ?? [])}</span><small>{leg.sport} · {when(leg.startsAt)} · {venueName(leg.venue)}</small></div><strong>{pct(leg.probability)}</strong></div>)}</div>
-              <div className="combo-detail-line"><span>Dependence bounds</span><strong>{pct(combo.lowerBound)} – {pct(combo.upperBound)}</strong></div><div className="combo-detail-line"><span>Independent events</span><strong>{combo.independentEvents}</strong></div>
+              <div className="combo-detail-line"><span>Standalone-ask payout reference</span><strong>{multiple(combo.referenceGrossMultiplier)}</strong></div><div className="combo-detail-line"><span>Reference break-even chance</span><strong>{pct(combo.referenceBreakEven)}</strong></div><div className="combo-detail-line"><span>Dependence bounds</span><strong>{pct(combo.lowerBound)} – {pct(combo.upperBound)}</strong></div><div className="combo-detail-line"><span>Distinct games</span><strong>{combo.independentEvents}</strong></div>
               <div className="combo-action-row"><button className="secondary-button" onClick={() => saveCombo(combo, "research")}><Bookmark size={16} />{saved.some((item) => item.combo.id === combo.id) ? "Update saved" : "Save combo"}</button><button className="secondary-button" onClick={() => saveCombo(combo, "paper-open")}><Ticket size={16} />Paper track</button></div>
-              <p className="result-caveat">Research estimate only. No executable combo quote or payout is available.</p><details className="result-details"><summary>Assumptions and warnings</summary><ul>{[...combo.assumptions, ...combo.warnings].map((warning, n) => <li key={n}>{warning}</li>)}</ul></details>
+              <p className="result-caveat">Research only. The payout reference is calculated from standalone asks; no executable combo quote, joint model, or positive edge has been verified.</p><details className="result-details"><summary>Assumptions and warnings</summary><ul>{[...combo.assumptions, ...combo.warnings].map((warning, n) => <li key={n}>{warning}</li>)}</ul></details>
             </div> : result ? <Empty icon={FileSearch} title="No eligible combination found." copy={result.warnings[result.warnings.length - 1] ?? "Try more dates, sports, or fewer legs."} /> : <Empty icon={Ticket} title="The best available fit, for your criteria." copy="Generate to compare eligible combinations." />}
               {saveError && <div className="inline-alert error"><CircleAlert size={17} />{saveError}</div>}
-              <div className="rank-method"><h3>How we rank</h3><div><b>01</b><span>Win probability first</span></div><div><b>02</b><span>One leg per event</span></div><div><b>03</b><span>Verified market data</span></div></div>
+              <div className="rank-method"><h3>How we rank</h3><div><b>01</b><span>Meet the payout target</span></div><div><b>02</b><span>Best market-implied chance</span></div><div><b>03</b><span>One leg per verified game</span></div></div>
             </section>
           </div>
-          {result && result.combos.length > 1 && <section className="alternatives-section"><div className="section-heading"><h2>Alternative combinations</h2><span>Ranked by estimated chance of winning</span></div><div className="alternative-list">{result.combos.map((item, n) => <button key={item.id} className={"alternative-item" + (comboIndex === n ? " active" : "")} onClick={() => setComboIndex(n)}><span>#{item.rank}</span><span>{item.legs.map((leg) => leg.selection + " — " + legEvent(leg, catalog?.games ?? [])).join(" · ")}</span><strong>{pct(item.probability)}</strong><ArrowRight size={17} /></button>)}</div></section>}
+          {result && result.combos.length > 1 && <section className="alternatives-section"><div className="section-heading"><h2>Alternative combinations</h2><span>Qualified by standalone-ask payout reference</span></div><div className="alternative-list">{result.combos.map((item, n) => <button key={item.id} className={"alternative-item" + (comboIndex === n ? " active" : "")} onClick={() => setComboIndex(n)}><span>#{item.rank}</span><span>{item.legs.map((leg) => leg.selection + " — " + legEvent(leg, catalog?.games ?? [])).join(" · ")}</span><strong>{multiple(item.referenceGrossMultiplier)}</strong><ArrowRight size={17} /></button>)}</div></section>}
           {result?.warnings.length ? <div className="analysis-warning"><CircleAlert size={17} />{result.warnings.join(" ")}</div> : null}
           <MarketsPanel markets={markets} total={catalog?.markets.length ?? 0} search={search} setSearch={setSearch} limit={marketLimit} setLimit={setMarketLimit} loading={catalogBusy} error={catalogError} compact onRefresh={refresh} />
+        </>}
+        {view === "game-combos" && <>
+          <Intro title="Combos by game." copy="Ready-made research candidates for each upcoming matchup in the five listed sports." aside={catalog?.fetchedAt ? "Snapshot " + when(catalog.fetchedAt) : "Awaiting data"} />
+          <div className="featured-sports" role="group" aria-label="Choose sport">{SPORTS.map((sport) => <button key={sport} className={"select-chip" + (featuredSport === sport ? " selected" : "")} aria-pressed={featuredSport === sport} onClick={() => { setFeaturedSport(sport); setFeaturedGameId(null); }}>{sport}<span>{games.filter((game) => game.sport === sport && game.status === "scheduled").length}</span></button>)}</div>
+          <div className="featured-layout">
+            <section className="panel featured-game-list"><div className="section-heading"><h2>{featuredSport} games</h2><span>{start} to {end}</span></div>{featuredGames.length ? <div className="game-list">{featuredGames.map((game) => <button key={game.id} className={"game-list-item" + (featuredGame?.id === game.id ? " selected" : "")} onClick={() => setFeaturedGameId(game.id)}><span className="sport-square">{game.sport.slice(0, 2)}</span><span><strong>{game.title}</strong><small>{when(game.startsAt)}</small></span><ArrowRight size={17} /></button>)}</div> : <Empty icon={CalendarDays} title={catalogBusy ? "Checking schedules" : "No upcoming games in this sport"} copy={catalogError || "Try another sport or extend the dates in the generator."} />}</section>
+            <section className="panel featured-combos"><div className="section-heading"><div><h2>{featuredGame?.title ?? "Select a game"}</h2>{featuredGame && <p>{featuredSport} · {when(featuredGame.startsAt)} · automatically generated</p>}</div><button className="text-action" onClick={refresh} disabled={catalogBusy}><RefreshCw size={15} /> Refresh</button></div>
+              {venue === "polymarket-global" ? <Empty icon={Info} title="Choose a supported venue" copy="Select Kalshi or Polymarket US in the generator to prepare game combos." action={<button className="secondary-button" onClick={() => navigate("generator")}>Choose venue <ArrowRight size={16} /></button>} /> : featuredBusy ? <Empty icon={Activity} title="Preparing game combos" copy="Checking current asks, schedule matches, and the 3× reference target." /> : featuredError ? <div className="inline-alert error"><CircleAlert size={17} />{featuredError}</div> : featuredGame && featuredResult?.combos.length ? <div className="featured-combo-list">{featuredResult.combos.map((item) => <article className="featured-combo" key={item.id}><div className="featured-combo-top"><strong>#{item.rank} · {multiple(item.referenceGrossMultiplier)} reference</strong><span>{pct(item.probability)} market-implied</span></div><div className="featured-combo-legs">{item.legs.map((leg) => <div key={leg.id}><span>{leg.selection}</span><small>{legEvent(leg, catalog?.games ?? [])} · {cents(leg.entryPrice)} ask</small></div>)}</div><div className="featured-combo-actions"><span>2 verified games · no combo quote</span><button className="secondary-button" onClick={() => saveCombo(item, "research")}><Bookmark size={15} /> Save</button></div></article>)}</div> : <Empty icon={FileSearch} title={featuredGame ? "No qualifying combo for this game" : "No upcoming game in this sport"} copy={featuredGame ? featuredResult?.warnings.at(-1) || "A 3× payout reference requires two verified games with current asks. Try another matchup." : "Choose another sport or adjust the date range in the generator."} />}
+              <p className="featured-note">Each candidate includes one leg from the selected game and one from another verified game in the same sport. The reference multiplier multiplies standalone asks; actual combo pricing and the true joint win chance are unknown.</p>
+            </section>
+          </div>
         </>}
         {view === "dashboard" && <>
           <Intro title="Sports market overview." copy="Real schedules, contract availability, and your latest research in one place." aside={when(new Date().toISOString(), false)} />
           <div className="metric-grid"><Metric label="Upcoming games" value={catalog ? String(games.length) : "—"} detail={catalog ? games.filter((game) => dateET(new Date(game.startsAt)) === today).length + " today" : "Waiting for schedule"} icon={CalendarDays} /><Metric label="Available markets" value={catalog ? String(catalog.markets.length) : "—"} detail={venueName(venue)} icon={Activity} /><Metric label="Connected sources" value={catalog ? catalog.sources.filter((source) => source.status === "connected").length + "/" + catalog.sources.length : "—"} detail={dataFresh ? "Current snapshot" : "Check source health"} icon={CircleCheck} /><Metric label="Saved research" value={String(saved.length)} detail={saved.filter((item) => item.status === "paper-open").length + " open paper records"} icon={Bookmark} /></div>
           <div className="dashboard-grid"><section className="panel dashboard-card"><div className="section-heading"><h2>Upcoming games</h2><button className="text-action" onClick={() => navigate("games")}>View all <ArrowRight size={14} /></button></div>{games.length ? <div className="simple-list">{games.slice(0, 6).map((game) => <button className="simple-row" key={game.id} onClick={() => { setSelectedGame(game.id); navigate("games"); }}><span className="sport-square">{game.sport.slice(0, 2)}</span><span><strong>{game.title}</strong><small>{game.sport} · {when(game.startsAt)}</small></span><ArrowRight size={17} /></button>)}</div> : <Empty icon={CalendarDays} title={catalogBusy ? "Loading schedules" : "No upcoming games found"} copy={catalogError || "Expand the date range or check source health."} />}</section><section className="panel dashboard-card"><div className="section-heading"><h2>Source status</h2><button className="text-action" onClick={() => navigate("health")}>Data health <ArrowRight size={14} /></button></div>{catalog?.sources.length ? <div className="source-mini-list">{catalog.sources.map((source) => <div className="source-mini" key={source.id}><span className={"status-dot " + source.status} /><span>{source.name}</span><small>{source.status}</small></div>)}</div> : <Empty icon={Activity} title="Sources are loading" copy={catalogError || "The catalog is checking available feeds."} />}</section></div>
           <section className="panel dashboard-card"><div className="section-heading"><h2>Current market snapshot</h2><button className="text-action" onClick={() => navigate("scanner")}>Open scanner <ArrowRight size={14} /></button></div><MarketRows markets={markets.slice(0, 5)} empty="No markets were returned for this scope." /></section>
-          <div className="dashboard-action"><div><h2>Ready to build?</h2><p>Choose multiple sports and dates, then rank combinations by estimated chance of winning.</p></div><button className="generate-button" onClick={() => navigate("generator")}>Open combo generator <ArrowRight size={18} /></button></div>
+          <div className="dashboard-action"><div><h2>Ready to build?</h2><p>Choose a payout target and find the strongest qualifying market-price combination.</p></div><button className="generate-button" onClick={() => navigate("generator")}>Open combo generator <ArrowRight size={18} /></button></div>
         </>}
         {view === "scanner" && <>
           <Intro title="Market scanner." copy="Search current contracts and inspect venue prices." aside={catalog?.fetchedAt ? "Fetched " + when(catalog.fetchedAt) : "Awaiting data"} />
@@ -296,7 +336,7 @@ export default function HomePage() {
           <Intro title="Settings & data health." copy="See exactly which sources responded and when their data was fetched." aside={catalog?.fetchedAt ? "Snapshot " + when(catalog.fetchedAt) : "No snapshot"} />
           <div className="health-summary"><div><span>Market snapshot</span><strong>{catalog ? catalog.markets.length + " contracts" : "Unavailable"}</strong><small>{catalog?.fetchedAt ? when(catalog.fetchedAt) : catalogError || "Loading"}</small></div><div><span>Schedule</span><strong>{catalog ? catalog.games.length + " games" : "Unavailable"}</strong><small>{start} to {end}</small></div><div><span>Probability model</span><strong>Not connected</strong><small>Market-implied estimates only</small></div></div>
           <section className="panel health-panel"><div className="section-heading"><h2>Data sources</h2><button className="text-action" onClick={refresh}><RefreshCw size={14} /> Recheck</button></div>{catalog?.sources.length ? <div className="source-list">{catalog.sources.map((source) => <SourceRow source={source} key={source.id} />)}</div> : <Empty icon={Activity} title={catalogBusy ? "Checking sources" : "No source status available"} copy={catalogError || "Refresh to inspect source connectivity."} />}</section>
-          <section className="panel health-panel"><div className="section-heading"><h2>Method and limitations</h2></div><div className="method-grid"><div><b>01</b><strong>Market-implied probabilities</strong><p>Contract prices are normalized into marginal probabilities. They are not calibrated sports forecasts.</p></div><div><b>02</b><strong>Independent-event ranking</strong><p>Combinations are ordered by the product of estimates across distinct events. Dependence can change the true result.</p></div><div><b>03</b><strong>Research, not a quote</strong><p>Venue combo prices are unavailable here. A calculated probability is not an executable payout.</p></div></div>{catalog?.warnings.length ? <div className="health-warnings"><h3>Current feed warnings</h3>{catalog.warnings.map((warning, n) => <p key={n}><CircleAlert size={15} />{warning}</p>)}</div> : null}</section>
+          <section className="panel health-panel"><div className="section-heading"><h2>Method and limitations</h2></div><div className="method-grid"><div><b>01</b><strong>Market-implied probabilities</strong><p>Contract prices are normalized into marginal probabilities. They are not calibrated sports forecasts.</p></div><div><b>02</b><strong>Payout-constrained ranking</strong><p>We screen by standalone asks, then rank qualifying distinct-game combinations by market-implied chance. The bucketed search is approximate.</p></div><div><b>03</b><strong>Research, not a quote</strong><p>Venue combo prices are unavailable here. A theoretical multiplier is not an executable payout or proof of positive value.</p></div></div>{catalog?.warnings.length ? <div className="health-warnings"><h3>Current feed warnings</h3>{catalog.warnings.map((warning, n) => <p key={n}><CircleAlert size={15} />{warning}</p>)}</div> : null}</section>
         </>}
         <footer className="page-footer">Probabilities are estimates. Analytical combinations require a venue quote.</footer>
       </main>

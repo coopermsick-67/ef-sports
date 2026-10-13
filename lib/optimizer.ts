@@ -86,6 +86,10 @@ function eventGroup(market: Market): string {
   return `event:${market.venue}:${market.eventId}`;
 }
 
+function teamKey(sport: Sport, team: string): string {
+  return `${sport}:${team.toLowerCase().replace(/[^a-z0-9]/g, "")}`;
+}
+
 interface PartialCombo {
   legs: ComboLeg[];
   logProbability: number;
@@ -162,6 +166,7 @@ export function optimizeCombos(
     if (!date || date < request.start || date > request.end) { reject("date-filter"); continue; }
     const game = market.gameId ? schedule.get(market.gameId) : undefined;
     if (game && (game.status === "final" || game.status === "postponed")) { reject("finished-game"); continue; }
+    if (game && game.status !== "scheduled") { reject("game-not-scheduled"); continue; }
     if (games.size && (!market.gameId || !games.has(market.gameId))) { reject("game-filter"); continue; }
     if (categories.size && !categories.has(market.category)) { reject("category-filter"); continue; }
     if ((request.minLiquidity ?? 0) > 0 &&
@@ -180,6 +185,9 @@ export function optimizeCombos(
       }
       const probability = side === "yes" ? estimate.yes : estimate.no;
       const entryPrice = side === "yes" ? market.yesAsk : market.noAsk;
+      if (payoutFloor > 1 && (probability < 0.2 || probability > 0.8)) {
+        reject("extreme-single-leg-proxy"); continue;
+      }
       if (entryPrice === null || !Number.isFinite(entryPrice) || entryPrice <= 0 || entryPrice >= 1) {
         reject("unavailable-ask"); continue;
       }
@@ -209,6 +217,7 @@ export function optimizeCombos(
   const warnings = [...catalog.warnings];
   warnings.push("No calibrated sports model is connected. Probabilities are normalized market prices, not independent forecasts.");
   warnings.push("Reference payout multiplies standalone asks only. It is not an executable combo price or an expected-value estimate.");
+  if (payoutFloor > 1) warnings.push("The screen excludes standalone legs outside a 20%–80% market-implied range to avoid lottery legs and near-certain fillers.");
   const availableLegs = Math.min(10, groups.size);
   const result: ComboResult = {
     combos: [],
@@ -249,6 +258,8 @@ export function optimizeCombos(
         put(`${path.legs.length}:${path.sportsMask}:${Number(path.hasAnchor)}`, path);
         if (path.legs.length >= request.legs) continue;
         for (const leg of candidates) {
+          if ((leg.teams ?? []).some((team) => path.legs.some((previous) =>
+            (previous.teams ?? []).some((priorTeam) => teamKey(previous.sport, priorTeam) === teamKey(leg.sport, team))))) continue;
           const sportsMask = request.requireEachSport
             ? path.sportsMask | (1 << selectedSports.indexOf(leg.sport)) : 0;
           const hasAnchor = path.hasAnchor || leg.gameId === request.anchorGameId;
@@ -280,7 +291,7 @@ export function optimizeCombos(
     const teamCounts = new Map<string, { label: string; count: number }>();
     for (const leg of path.legs) {
       for (const team of new Set(leg.teams ?? [])) {
-        const key = `${leg.sport}:${team.toLowerCase().replace(/[^a-z0-9]/g, "")}`;
+        const key = teamKey(leg.sport, team);
         const previous = teamCounts.get(key);
         teamCounts.set(key, { label: team, count: (previous?.count ?? 0) + 1 });
       }
