@@ -153,13 +153,12 @@ export default function HomePage() {
   const toggleGame = (id: string) => setGameIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
   const generate = async () => {
     setGenerateError(""); setResult(null);
-    if (!sports.length) { setGenerateError("Select at least one sport to search."); return; }
     if (!validDates) { setGenerateError("Choose a valid start and end date."); return; }
     if (venue === "polymarket-global") { setGenerateError("Global markets are read-only. Choose Kalshi or Polymarket US for combos."); return; }
     setGenerateBusy(true);
     try {
       const body = {
-        sports, start, end, venue, legs, stake: Number(stake) || 0, requireEachSport,
+        sports: sports.length ? sports : [...SPORTS], start, end, venue, legs, stake: Number(stake) || 0, requireEachSport,
         ...(categories.length ? { marketCategories: categories } : {}),
         ...(minLiquidity !== "" ? { minLiquidity: Number(minLiquidity) } : {}),
         ...(maxSpread !== "" ? { maxSpread: Number(maxSpread) / 100 } : {}),
