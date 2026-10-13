@@ -262,16 +262,25 @@ async function kalshi(query: CatalogQuery, games: Game[]) {
   try {
     const response = await json("https://api.elections.kalshi.com/trade-api/v2/series?category=Sports", 3_600_000);
     allCached = response.cached;
-    const suffixes = ["GAME", "SPREAD", "TOTAL", "TEAMTOTAL", "PTS", "REB", "AST", "3PT", "PASSYDS", "RSHYDS", "RECYDS", "REC", "TD", "KS", "SO", "HITS", "HR", "1HWINNER", "1HTOTAL", "1HSPREAD", "F5TOTAL", "F5SPREAD", "F5GAME"];
+    const suffixesBySport: Partial<Record<Sport, string[]>> = {
+      MLB: ["GAME", "SPREAD", "TOTAL", "TEAMTOTAL", "HR", "HITS", "SO", "KS", "F5GAME", "F5SPREAD", "F5TOTAL"],
+      NFL: ["GAME", "SPREAD", "TOTAL", "TEAMTOTAL", "PASSYDS", "RSHYDS", "RECYDS", "TD", "REC", "1HWINNER", "1HSPREAD", "1HTOTAL"],
+      NCAAF: ["GAME", "SPREAD", "TOTAL", "TEAMTOTAL", "PASSYDS", "RSHYDS", "RECYDS", "TD", "REC", "1HWINNER", "1HSPREAD", "1HTOTAL"],
+      NBA: ["GAME", "SPREAD", "TOTAL", "TEAMTOTAL", "PTS", "REB", "AST", "3PT", "1HWINNER", "1HSPREAD", "1HTOTAL"],
+      NCAAB: ["GAME", "SPREAD", "TOTAL", "TEAMTOTAL", "PTS", "REB", "AST", "3PT", "1HWINNER", "1HSPREAD", "1HTOTAL"],
+    };
     const series = list(object(response.data).series).flatMap(raw => {
       const ticker = string(raw.ticker);
       const sport = query.sports.find(s => ticker.startsWith(`KX${s}`));
       if (!sport) return [];
       const suffix = ticker.slice(`KX${sport}`.length);
-      return suffixes.includes(suffix) ? [{ ticker, sport, priority: suffixes.indexOf(suffix) }] : [];
-    }).sort((a, b) => a.priority - b.priority);
-    const selected = query.sports.flatMap(sport => series.filter(s => s.sport === sport).slice(0, 14));
-    if (selected.length < series.length) warnings.push("Kalshi discovery is bounded to 14 supported series per sport; other specialized series are not included.");
+      const priority = suffixesBySport[sport]?.indexOf(suffix) ?? -1;
+      return priority >= 0 ? [{ ticker, sport, priority }] : [];
+    }).sort((a, b) => a.sport.localeCompare(b.sport) || a.priority - b.priority);
+    // Keep the serverless discovery pass within the venue's practical request
+    // budget so a full multi-sport slate is less likely to trigger HTTP 429s.
+    const selected = query.sports.flatMap(sport => series.filter(s => s.sport === sport).slice(0, 8));
+    if (selected.length < series.length) warnings.push("Kalshi discovery is bounded to 8 supported series per sport; other specialized series are not included.");
     const from = Math.floor(Date.parse(newYorkInstant(query.start)) / 1_000);
     const dayAfterEnd = new Date(Date.parse(`${query.end}T12:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
     const to = Math.floor(Date.parse(newYorkInstant(dayAfterEnd)) / 1_000) + 3 * 86_400;
