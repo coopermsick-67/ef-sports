@@ -13,6 +13,7 @@ export interface ComboRequest {
   maxSpread?: number;
   excluded?: string[];
   gameIds?: string[];
+  anchorGameId?: string;
   requireEachSport?: boolean;
 }
 
@@ -86,6 +87,7 @@ interface PartialCombo {
   legs: ComboLeg[];
   logProbability: number;
   sportsMask: number;
+  hasAnchor: boolean;
   key: string;
 }
 
@@ -209,7 +211,7 @@ export function optimizeCombos(
     warnings.push("There are more required sports than legs. Increase the leg count or select fewer sports.");
     return result;
   }
-  let states = new Map<string, PartialCombo[]>([["0:0", [{ legs: [], logProbability: 0, sportsMask: 0, key: "" }]]]);
+  let states = new Map<string, PartialCombo[]>([["0:0:0", [{ legs: [], logProbability: 0, sportsMask: 0, hasAnchor: false, key: "" }]]]);
   for (const [groupId, selections] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const next = new Map<string, PartialCombo[]>();
     const put = (stateKey: string, path: PartialCombo) => next.set(stateKey, [...(next.get(stateKey) ?? []), path]);
@@ -220,14 +222,15 @@ export function optimizeCombos(
       legs.sort((a, b) => b.probability - a.probability || a.id.localeCompare(b.id)).slice(0, limit));
     for (const paths of states.values()) {
       for (const path of paths) {
-        put(`${path.legs.length}:${path.sportsMask}`, path);
+        put(`${path.legs.length}:${path.sportsMask}:${Number(path.hasAnchor)}`, path);
         if (path.legs.length >= request.legs) continue;
         for (const leg of candidates) {
           const sportsMask = request.requireEachSport
             ? path.sportsMask | (1 << selectedSports.indexOf(leg.sport)) : 0;
+          const hasAnchor = path.hasAnchor || leg.gameId === request.anchorGameId;
           const key = path.key ? `${path.key}|${groupId}/${leg.id}` : `${groupId}/${leg.id}`;
-          put(`${path.legs.length + 1}:${sportsMask}`, {
-            legs: [...path.legs, leg], logProbability: path.logProbability + Math.log(leg.probability), sportsMask, key,
+          put(`${path.legs.length + 1}:${sportsMask}:${Number(hasAnchor)}`, {
+            legs: [...path.legs, leg], logProbability: path.logProbability + Math.log(leg.probability), sportsMask, hasAnchor, key,
           });
         }
       }
@@ -236,7 +239,7 @@ export function optimizeCombos(
     states = next;
   }
   const fullMask = request.requireEachSport ? (1 << selectedSports.length) - 1 : 0;
-  const winners = states.get(`${request.legs}:${fullMask}`) ?? [];
+  const winners = states.get(`${request.legs}:${fullMask}:${Number(Boolean(request.anchorGameId))}`) ?? [];
   if (!winners.length) warnings.push("No combination satisfies all of the selected sports and event constraints.");
   result.combos = winners.map((path, index) => {
     const marginals = path.legs.map((leg) => leg.probability);

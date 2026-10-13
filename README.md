@@ -8,6 +8,8 @@ The current optimizer compares binary market-implied probabilities from the avai
 
 These values are a ranking proxy, not a trained sports forecast. The displayed Frechet bounds describe possible dependence among the quoted marginal probabilities; they do not cover errors in those market probabilities. Distinct game outcomes may still be correlated, including repeat teams on different dates. The result is marked hypothetical because Kalshi combo RFQs and Polymarket combo execution are not obtained. No trades are placed.
 
+The **Game combos** page prepares one two-leg research candidate for each scheduled matchup across MLB, NFL, NCAAF, NBA and NCAAB. Each candidate is anchored to its displayed game and pairs it with the highest ranked eligible selection from a different verified game. It uses the same market-implied winning-probability ranking as the main generator. The slate loads 24 games at a time and batches candidate generation; missing or stale market matches produce an empty state instead of fabricated selections.
+
 ## Data and limits
 
 The application reads public venue and schedule endpoints. It keeps Kalshi, Polymarket US and optional Polymarket Global separate. Sources return status, count, freshness and errors. Provider failures do not substitute invented markets. The supported leagues are MLB, NFL, NCAAF, NBA and NCAAB; actual coverage depends on what the selected provider lists. Event matching remains unverified when team and date information cannot uniquely identify a scheduled game.

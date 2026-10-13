@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "EdgeForge Sports | Combo Research",
-  description: "Probability-first research for sports prediction markets across games, sports, and dates.",
+  description: "Payout-aware sports combo research across verified games, sports, and dates.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
