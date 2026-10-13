@@ -21,7 +21,6 @@ const schema = z.object({
   excluded: z.array(z.string().min(1).max(500)).max(500).optional(),
   gameIds: z.array(z.string().min(1).max(500)).max(500).optional(),
   requireEachSport: z.boolean().optional(),
-  minReferencePayout: z.number().finite().min(1).max(100).optional(),
   anchorGameId: z.string().min(1).max(500).optional(),
   anchorGameIds: z.array(z.string().min(1).max(500)).min(1).max(48).transform((ids) => [...new Set(ids)]).optional(),
 }).strict().refine((value) => {

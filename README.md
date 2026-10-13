@@ -4,11 +4,11 @@ A private, read-only sports market research site with a combo generator that acc
 
 ## What the generator ranks
 
-The optimizer compares binary market-implied probabilities from the available quote book. It normalizes affirmative and negative bid/ask midpoints, chooses at most one selection per verified game, excludes repeated teams across legs, and screens for a configurable **standalone-ask payout reference** (3× by default). Among qualifying combinations it ranks by the independent-events probability proxy. It requires usable buy-side asks, limits spreads to 15¢ by default, and screens out standalone legs with market-implied probabilities below 20% or above 80% when a payout target is active. The payout-bucket search is bounded and approximate; it is not a proof of the globally optimal ticket.
+The current optimizer compares binary market-implied probabilities from the available quote book. It normalizes affirmative and negative bid/ask midpoints, chooses at most one selection per game/event, and returns up to three candidates in descending product probability order. Its dynamic program is checked against exhaustive enumeration. It does not apply an edge or payout filter, so the requested number of legs can be returned even when the estimated chance of all legs winning is low.
 
-These values are a ranking proxy, not a trained sports forecast. The reference multiplier is the reciprocal of the product of standalone asks; it is **not** an executable combo quote, a promised payout, or evidence of positive expected value. The displayed Frechet bounds describe possible dependence among the quoted marginal probabilities; they do not cover errors in those market probabilities. Distinct game outcomes may still be correlated, including repeat teams on different dates. No trades are placed.
+These values are a ranking proxy, not a trained sports forecast. The displayed Frechet bounds describe possible dependence among the quoted marginal probabilities; they do not cover errors in those market probabilities. Distinct game outcomes may still be correlated, including repeat teams on different dates. The result is marked hypothetical because Kalshi combo RFQs and Polymarket combo execution are not obtained. No trades are placed.
 
-The **Game combos** page prepares a two-leg research candidate for each scheduled matchup across MLB, NFL, NCAAF, NBA and NCAAB. It shows 24 games at a time and lets the user expand longer schedules. Every candidate includes one leg from its displayed matchup and one from a different verified game in the same sport because a same-game joint probability and combo price are not available. The page shows a no-qualifying-combo state when the market or schedule evidence is insufficient.
+The **Game combos** page prepares one two-leg research candidate for each scheduled matchup across MLB, NFL, NCAAF, NBA and NCAAB. Each candidate is anchored to its displayed game and pairs it with the highest ranked eligible selection from a different verified game. It uses the same market-implied winning-probability ranking as the main generator. The slate loads 24 games at a time and batches candidate generation; missing or stale market matches produce an empty state instead of fabricated selections.
 
 ## Data and limits
 
@@ -42,7 +42,7 @@ node --test tests\optimizer.test.mjs
 npx tsc --noEmit
 ```
 
-The optimizer tests cover the payout floor, ask and spread checks, game anchoring, yes/no selection, freshness and settlement filtering, New York date boundaries, sports and event constraints, dependence bounds, 10-leg inputs, and API validation.
+The optimizer tests cover winning-probability ranking independent of standalone price, yes/no selection, freshness and settlement filtering, date boundaries in New York, sports and event constraints, dependence bounds, exact 1–10 leg outputs, API validation and exact top-three enumeration (19 passing tests).
 
 ## Architecture
 
@@ -52,7 +52,7 @@ The optimizer tests cover the payout floor, ask and spread checks, game anchorin
 - `app/api/saved`: authenticated D1 saved-research and paper-result records
 - `lib/providers.ts`: read-only public data adapters, identity matching and freshness
 - `lib/models.ts`: market-implied estimates and dependence bounds
-- `lib/optimizer.ts`: bounded payout-bucket combo search
+- `lib/optimizer.ts`: exact k-best combo search
 - `db/`: D1 schema and generated migration
 - `tests/optimizer.test.mjs`: numerical and constraint tests
 - `docs/design-concept.png`: accepted primary-screen design concept

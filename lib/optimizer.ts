@@ -13,9 +13,8 @@ export interface ComboRequest {
   maxSpread?: number;
   excluded?: string[];
   gameIds?: string[];
-  requireEachSport?: boolean;
-  minReferencePayout?: number;
   anchorGameId?: string;
+  requireEachSport?: boolean;
 }
 
 export interface ComboLeg extends Market {
@@ -46,8 +45,6 @@ export interface Combo {
   modelStatus: "unavailable";
   independentEvents: number;
   repeatedTeams: string[];
-  referenceGrossMultiplier: number;
-  referenceBreakEven: number;
 }
 
 export interface ComboResult {
@@ -60,8 +57,8 @@ export interface ComboResult {
     independentEventGroups: number;
     requestedLegs: number;
     availableLegs: number;
-    algorithm: "payout-bucket-dynamic-programming";
-    ranking: "payout-constrained-market-proxy";
+    algorithm: "exact-k-best-dynamic-programming";
+    ranking: "winning-probability";
     modelStatus: "unavailable";
     rejected: Record<string, number>;
   };
@@ -86,35 +83,28 @@ function eventGroup(market: Market): string {
   return `event:${market.venue}:${market.eventId}`;
 }
 
-function teamKey(sport: Sport, team: string): string {
-  return `${sport}:${team.toLowerCase().replace(/[^a-z0-9]/g, "")}`;
-}
-
 interface PartialCombo {
   legs: ComboLeg[];
   logProbability: number;
-  logReferencePayout: number;
   sportsMask: number;
   hasAnchor: boolean;
   key: string;
 }
 
-function keepBest(options: PartialCombo[]): PartialCombo[] {
-  const buckets = new Map<number, PartialCombo[]>();
+function keepBest(options: PartialCombo[], count: number): PartialCombo[] {
+  options.sort((a, b) => b.logProbability - a.logProbability || a.key.localeCompare(b.key));
   const seen = new Set<string>();
-  for (const option of options.sort((a, b) => b.logProbability - a.logProbability || a.key.localeCompare(b.key))) {
-    if (seen.has(option.key)) continue;
+  return options.filter((option) => {
+    if (seen.has(option.key)) return false;
     seen.add(option.key);
-    const bucket = Math.min(60, Math.floor(option.logReferencePayout / 0.15));
-    const paths = buckets.get(bucket) ?? [];
-    if (paths.length < 5) { paths.push(option); buckets.set(bucket, paths); }
-  }
-  return [...buckets.values()].flat().sort((a, b) => b.logProbability - a.logProbability).slice(0, 300);
+    return true;
+  }).slice(0, count);
 }
 
 /**
- * Bounded payout-bucket search. Each physical game contributes at most one selection.
- * This is a market-price research screen, not a claim of positive expected value.
+ * Exact k-best grouped dynamic programming. Each group contributes zero or one selection;
+ * retaining k paths per (count, sport mask) is exact because all share the same future choices.
+ * This optimizes the explicitly declared independence proxy, not unknown true joint probability.
  */
 export function optimizeCombos(
   catalog: Catalog,
@@ -126,10 +116,6 @@ export function optimizeCombos(
   }
   const now = options.now ?? Date.now();
   const limit = Math.max(1, Math.min(10, Math.floor(options.limit ?? 3)));
-  const payoutFloor = request.minReferencePayout ?? 3;
-  if (!Number.isFinite(payoutFloor) || payoutFloor < 1 || payoutFloor > 100) {
-    throw new RangeError("Choose a reference payout target between 1x and 100x.");
-  }
   const rejected: Record<string, number> = {};
   const reject = (reason: string) => { rejected[reason] = (rejected[reason] ?? 0) + 1; };
   const selectedSports = [...new Set(request.sports)];
@@ -166,7 +152,6 @@ export function optimizeCombos(
     if (!date || date < request.start || date > request.end) { reject("date-filter"); continue; }
     const game = market.gameId ? schedule.get(market.gameId) : undefined;
     if (game && (game.status === "final" || game.status === "postponed")) { reject("finished-game"); continue; }
-    if (game && game.status !== "scheduled") { reject("game-not-scheduled"); continue; }
     if (games.size && (!market.gameId || !games.has(market.gameId))) { reject("game-filter"); continue; }
     if (categories.size && !categories.has(market.category)) { reject("category-filter"); continue; }
     if ((request.minLiquidity ?? 0) > 0 &&
@@ -185,15 +170,6 @@ export function optimizeCombos(
       }
       const probability = side === "yes" ? estimate.yes : estimate.no;
       const entryPrice = side === "yes" ? market.yesAsk : market.noAsk;
-      if (payoutFloor > 1 && (probability < 0.2 || probability > 0.8)) {
-        reject("extreme-single-leg-proxy"); continue;
-      }
-      if (entryPrice === null || !Number.isFinite(entryPrice) || entryPrice <= 0 || entryPrice >= 1) {
-        reject("unavailable-ask"); continue;
-      }
-      if (spread === null || spread > (request.maxSpread ?? 0.15) + 1e-12) {
-        reject(spread === null ? "unknown-spread" : "wide-spread"); continue;
-      }
       selections.push({
         ...market,
         id: `${market.id}:${side}`,
@@ -205,7 +181,7 @@ export function optimizeCombos(
         entryPrice,
         spread,
         eventGroup: group,
-        reason: `${(probability * 100).toFixed(1)}% market-implied marginal; ${(entryPrice * 100).toFixed(1)}¢ standalone ask.`,
+        reason: `${(probability * 100).toFixed(1)}% market-implied marginal; ranked solely by the probability proxy.`,
       });
     }
     if (!selections.length) continue;
@@ -216,8 +192,6 @@ export function optimizeCombos(
 
   const warnings = [...catalog.warnings];
   warnings.push("No calibrated sports model is connected. Probabilities are normalized market prices, not independent forecasts.");
-  warnings.push("Reference payout multiplies standalone asks only. It is not an executable combo price or an expected-value estimate.");
-  if (payoutFloor > 1) warnings.push("The screen excludes standalone legs outside a 20%–80% market-implied range to avoid lottery legs and near-certain fillers.");
   const availableLegs = Math.min(10, groups.size);
   const result: ComboResult = {
     combos: [],
@@ -225,7 +199,7 @@ export function optimizeCombos(
     diagnostics: {
       inputMarkets: catalog.markets.length, eligibleMarkets, candidateSelections,
       independentEventGroups: groups.size, requestedLegs: request.legs, availableLegs,
-      algorithm: "payout-bucket-dynamic-programming", ranking: "payout-constrained-market-proxy",
+      algorithm: "exact-k-best-dynamic-programming", ranking: "winning-probability",
       modelStatus: "unavailable", rejected,
     },
   };
@@ -237,61 +211,43 @@ export function optimizeCombos(
     warnings.push("There are more required sports than legs. Increase the leg count or select fewer sports.");
     return result;
   }
-  if (request.anchorGameId && !groups.has(`game:${request.anchorGameId}`)) {
-    warnings.push("No eligible current contract is matched to the selected game.");
-    return result;
-  }
-
-  let states = new Map<string, PartialCombo[]>([["0:0:0", [{ legs: [], logProbability: 0, logReferencePayout: 0, sportsMask: 0, hasAnchor: false, key: "" }]]]);
+  let states = new Map<string, PartialCombo[]>([["0:0:0", [{ legs: [], logProbability: 0, sportsMask: 0, hasAnchor: false, key: "" }]]]);
   for (const [groupId, selections] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const next = new Map<string, PartialCombo[]>();
     const put = (stateKey: string, path: PartialCombo) => next.set(stateKey, [...(next.get(stateKey) ?? []), path]);
-    const eventOptions = new Map<string, ComboLeg[]>();
-    for (const selection of selections) {
-      const bucket = `${selection.sport}:${Math.floor(-Math.log(selection.entryPrice!) / 0.15)}`;
-      eventOptions.set(bucket, [...(eventOptions.get(bucket) ?? []), selection]);
-    }
+    // At most k choices per sport are needed from one event: lower choices cannot enter top k.
+    const eventOptions = new Map<Sport, ComboLeg[]>();
+    for (const selection of selections) eventOptions.set(selection.sport, [...(eventOptions.get(selection.sport) ?? []), selection]);
     const candidates = [...eventOptions.values()].flatMap((legs) =>
-      legs.sort((a, b) => b.probability - a.probability || a.id.localeCompare(b.id)).slice(0, 3));
+      legs.sort((a, b) => b.probability - a.probability || a.id.localeCompare(b.id)).slice(0, limit));
     for (const paths of states.values()) {
       for (const path of paths) {
         put(`${path.legs.length}:${path.sportsMask}:${Number(path.hasAnchor)}`, path);
         if (path.legs.length >= request.legs) continue;
         for (const leg of candidates) {
-          if ((leg.teams ?? []).some((team) => path.legs.some((previous) =>
-            (previous.teams ?? []).some((priorTeam) => teamKey(previous.sport, priorTeam) === teamKey(leg.sport, team))))) continue;
           const sportsMask = request.requireEachSport
             ? path.sportsMask | (1 << selectedSports.indexOf(leg.sport)) : 0;
           const hasAnchor = path.hasAnchor || leg.gameId === request.anchorGameId;
           const key = path.key ? `${path.key}|${groupId}/${leg.id}` : `${groupId}/${leg.id}`;
           put(`${path.legs.length + 1}:${sportsMask}:${Number(hasAnchor)}`, {
-            legs: [...path.legs, leg], logProbability: path.logProbability + Math.log(leg.probability),
-            logReferencePayout: path.logReferencePayout - Math.log(leg.entryPrice!), sportsMask, hasAnchor, key,
+            legs: [...path.legs, leg], logProbability: path.logProbability + Math.log(leg.probability), sportsMask, hasAnchor, key,
           });
         }
       }
     }
-    for (const [stateKey, paths] of next) next.set(stateKey, keepBest(paths));
+    for (const [stateKey, paths] of next) next.set(stateKey, keepBest(paths, limit));
     states = next;
   }
   const fullMask = request.requireEachSport ? (1 << selectedSports.length) - 1 : 0;
-  const finalists = states.get(`${request.legs}:${fullMask}:${Number(Boolean(request.anchorGameId))}`) ?? [];
-  const eligible = finalists.filter((path) => path.logReferencePayout + 1e-12 >= Math.log(payoutFloor))
-    .sort((a, b) => b.logProbability - a.logProbability || a.logReferencePayout - b.logReferencePayout);
-  const winners: PartialCombo[] = [];
-  for (const path of eligible) {
-    if (winners.some((previous) => path.legs.filter((leg) => previous.legs.some((other) => other.eventGroup === leg.eventGroup)).length > Math.floor(request.legs / 2))) continue;
-    winners.push(path);
-    if (winners.length === limit) break;
-  }
-  if (!winners.length) warnings.push(finalists.length ? `No combination reaches the ${payoutFloor}x standalone-ask reference payout with the selected filters.` : "No combination satisfies all selected sports and game constraints.");
+  const winners = states.get(`${request.legs}:${fullMask}:${Number(Boolean(request.anchorGameId))}`) ?? [];
+  if (!winners.length) warnings.push("No combination satisfies all of the selected sports and event constraints.");
   result.combos = winners.map((path, index) => {
     const marginals = path.legs.map((leg) => leg.probability);
     const bounds = frechetBounds(marginals);
     const teamCounts = new Map<string, { label: string; count: number }>();
     for (const leg of path.legs) {
       for (const team of new Set(leg.teams ?? [])) {
-        const key = teamKey(leg.sport, team);
+        const key = `${leg.sport}:${team.toLowerCase().replace(/[^a-z0-9]/g, "")}`;
         const previous = teamCounts.get(key);
         teamCounts.set(key, { label: team, count: (previous?.count ?? 0) + 1 });
       }
@@ -325,8 +281,6 @@ export function optimizeCombos(
       modelStatus: "unavailable",
       independentEvents: path.legs.length,
       repeatedTeams,
-      referenceGrossMultiplier: Math.exp(path.logReferencePayout),
-      referenceBreakEven: Math.exp(-path.logReferencePayout),
     };
   });
   return result;
