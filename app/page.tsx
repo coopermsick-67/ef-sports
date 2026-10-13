@@ -10,7 +10,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { SPORTS } from "../lib/types";
 import type { Catalog, Game, Market, MarketCategory, SourceStatus, Sport, Venue } from "../lib/types";
-import type { Combo, ComboResult } from "../lib/optimizer";
+import type { Combo, ComboResult, PremadeComboTier, PremadeGameResult } from "../lib/optimizer";
 
 type View = "dashboard" | "generator" | "game-combos" | "scanner" | "games" | "players" | "saved" | "health";
 type SaveStatus = "research" | "paper-open" | "paper-won" | "paper-lost";
@@ -49,9 +49,18 @@ function when(iso: string, time = true) {
   return new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", ...(time ? { hour: "numeric", minute: "2-digit" } : {}) }).format(date) + (time ? " ET" : "");
 }
 function pct(value: number | null | undefined) { return typeof value === "number" && Number.isFinite(value) ? (value * 100).toFixed(1) + "%" : "—"; }
+function pctPrecise(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  const percent = value * 100;
+  return percent < 0.01 ? "<0.01%" : percent < 1 ? percent.toFixed(2) + "%" : percent.toFixed(1) + "%";
+}
 function cents(value: number | null | undefined) { return typeof value === "number" && Number.isFinite(value) ? Math.round(value * 100) + "¢" : "—"; }
 function compact(value: number | null | undefined) { return typeof value === "number" && Number.isFinite(value) ? new Intl.NumberFormat("en-US", { notation: "compact" }).format(value) : "—"; }
 function venueName(value: Venue) { return VENUES.find((item) => item.id === value)?.label ?? value; }
+function payoutMultiple(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  return (value >= 1000 ? new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(value) : value.toFixed(1)) + "×";
+}
 function legEvent(leg: Combo["legs"][number], games: Game[] = []) {
   return (leg.gameId ? games.find((game) => game.id === leg.gameId)?.title : undefined)
     || leg.providerEventTitle?.trim() || leg.title;
@@ -78,7 +87,7 @@ export default function HomePage() {
   const [legs, setLegs] = useState(3);
   const [featuredSport, setFeaturedSport] = useState<Sport>("MLB");
   const [featuredLimit, setFeaturedLimit] = useState(24);
-  const [featuredResults, setFeaturedResults] = useState<Record<string, ComboResult>>({});
+  const [featuredResults, setFeaturedResults] = useState<Record<string, PremadeGameResult>>({});
   const [featuredBusy, setFeaturedBusy] = useState(false);
   const [featuredError, setFeaturedError] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -238,23 +247,36 @@ export default function HomePage() {
     const load = async () => {
       setFeaturedBusy(true); setFeaturedError("");
       try {
-        const requestSlate = async (sourceVenue: Venue) => {
-          const body = { sports: [featuredSport], start, end, venue: sourceVenue, legs: 2, anchorGameIds };
+        const requestSlate = async (sourceVenue: Venue | "all", broadRecovery = false) => {
+          const body = {
+            sports: broadRecovery ? [...SPORTS] : [featuredSport],
+            ...(broadRecovery ? { anchorSport: featuredSport } : {}),
+            start, end, venue: sourceVenue, legs: 10, anchorGameIds, tiered: true,
+          };
           const response = await fetch("/api/combos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), cache: "no-store", signal: controller.signal });
           const data = await json(response);
           if (!response.ok) throw new Error(message(data, "Could not prepare game combos."));
-          const results = (data as { gameCombos?: Record<string, ComboResult> }).gameCombos;
+          const results = (data as { gameCombos?: Record<string, PremadeGameResult> }).gameCombos;
           if (!results || typeof results !== "object") throw new Error("The combo service returned an invalid game slate.");
           return results;
         };
         const results = await requestSlate(venue);
-        const missingAnchors = anchorGameIds.filter((gameId) => !results[gameId]?.combos.length);
-        // Kalshi may throttle a hosted worker. Fill empty matchup cards from the
-        // other US venue, and search all supported sports for a companion event.
-        if (venue === "kalshi" && missingAnchors.length) {
-          const fallback = await requestSlate("polymarket-us");
+        const missingAnchors = anchorGameIds.filter((gameId) => results[gameId]?.tiers.some((tier) => !tier.combo));
+        // A selected-venue pair may be unavailable even though both legs exist
+        // across the two US feeds. Retry only empty cards with a bounded broad
+        // catalog: anchor-sport Kalshi plus all-sport Polymarket US.
+        if (missingAnchors.length) {
+          const fallback = await requestSlate("all", true);
           for (const gameId of missingAnchors) {
-            if (fallback[gameId]?.combos.length) results[gameId] = fallback[gameId];
+            const primaryTiers = results[gameId]?.tiers ?? [];
+            const recoveryTiers = fallback[gameId]?.tiers ?? [];
+            results[gameId] = {
+              tiers: primaryTiers.map((tier) => tier.combo
+                ? tier
+                : recoveryTiers.find((candidate) => candidate.id === tier.id)?.combo
+                  ? recoveryTiers.find((candidate) => candidate.id === tier.id)!
+                  : tier),
+            };
           }
         }
         setFeaturedResults((current) => ({ ...current, ...Object.fromEntries(Object.entries(results).map(([gameId, result]) => {
@@ -325,22 +347,18 @@ export default function HomePage() {
           </div>
           <div className="featured-sports" role="group" aria-label="Choose sport">{SPORTS.map((sport) => <button key={sport} className={"select-chip" + (featuredSport === sport ? " selected" : "")} aria-pressed={featuredSport === sport} onClick={() => { setFeaturedSport(sport); setFeaturedLimit(24); setFeaturedError(""); }}>{sport}<span>{games.filter((game) => game.sport === sport).length}</span></button>)}</div>
           {venue === "polymarket-global" ? <section className="panel featured-empty"><Empty icon={Info} title="Choose a supported venue" copy="Global Polymarket markets are read-only. Pick Kalshi or Polymarket US to prepare and save game combos." /></section> : featuredError ? <div className="inline-alert error"><CircleAlert size={17} />{featuredError}</div> : catalogError ? <div className="inline-alert error"><CircleAlert size={17} />{catalogError}</div> : visibleFeaturedGames.length ? <>
-            <div className="slate-heading"><div><h2>{featuredSport} matchup slate</h2><p>{Math.min(featuredLimit, featuredGames.length)} of {featuredGames.length} scheduled or live games · one candidate per game</p></div><span className="slate-target">2 legs · strongest available pair</span></div>
+            <div className="slate-heading"><div><h2>{featuredSport} matchup slate</h2><p>{Math.min(featuredLimit, featuredGames.length)} of {featuredGames.length} scheduled or live games · three combo tiers per eligible game</p></div><span className="slate-target">3 legs · 6 legs · 10 legs</span></div>
             <div className="game-combo-grid">{visibleFeaturedGames.map((game) => {
               const gameResult = featuredResults[featuredResultKey(game)];
-              const item = gameResult?.combos[0];
+              const tiers = gameResult?.tiers ?? [];
               return <article className="panel game-combo-card" key={game.id}>
                 <header className="game-combo-header"><div><span className="game-combo-time">{when(game.startsAt)}</span><h3>{game.title}</h3></div><span className="sport-square">{game.sport}</span></header>
-                {featuredBusy && !gameResult ? <div className="game-combo-loading"><Activity size={17} className="spin" /> Preparing market matches…</div> : item ? <>
-                  <div className="game-combo-metrics"><div><small>Market-implied combo chance</small><strong>{pct(item.probability)}</strong></div><div><small>Standalone asks</small><strong>{item.legs.map((leg) => cents(leg.entryPrice)).join(" + ")}</strong></div></div>
-                  <div className="featured-combo-legs">{item.legs.map((leg) => <div key={leg.id} className={leg.gameId === game.id ? "anchor-leg" : "support-leg"}><span>{leg.selection}</span><small>{leg.gameId === game.id ? "This matchup" : legEvent(leg, catalog?.games ?? [])} · {venueName(leg.venue)} · {cents(leg.entryPrice)} standalone ask</small></div>)}</div>
-                  <div className="game-combo-footer"><span>2 verified games · no combo quote</span><button className="secondary-button" onClick={() => saveCombo(item, "research")}><Bookmark size={15} /> Save</button></div>
-                </> : gameResult ? <div className="game-combo-empty"><FileSearch size={18} /><div><strong>No qualifying candidate</strong><p>{gameResult.warnings.at(-1) || "No two-leg combination met the selected screen."}</p></div></div> : <div className="game-combo-loading"><Activity size={17} className="spin" /> Preparing market matches…</div>}
+                {featuredBusy && !gameResult ? <div className="game-combo-loading"><Activity size={17} className="spin" /> Preparing market matches…</div> : gameResult ? <div className="game-combo-tiers">{tiers.map((tier) => <PremadeTierCard key={tier.id} tier={tier} game={game} games={catalog?.games ?? []} onSave={(item) => saveCombo(item, "research")} />)}</div> : <div className="game-combo-loading"><Activity size={17} className="spin" /> Preparing market matches…</div>}
               </article>;
             })}</div>
             {featuredGames.length > featuredLimit && <div className="slate-more"><button className="secondary-button" onClick={() => setFeaturedLimit((limit) => Math.min(limit + 24, featuredGames.length))} disabled={featuredBusy}>Show next {Math.min(24, featuredGames.length - featuredLimit)} games <ArrowRight size={16} /></button></div>}
           </> : <section className="panel featured-empty"><Empty icon={CalendarDays} title={catalogBusy ? "Checking schedules" : "No upcoming games in this sport"} copy="Try another sport or widen the date range above." /></section>}
-          <p className="featured-note">Each matchup is paired with the strongest available market from another scheduled or live game in the selected sport. If Kalshi has no eligible pair, Polymarket US is checked as a fallback. Leg venues are shown separately; these are research estimates, not calibrated forecasts or executable combo quotes.</p>
+          <p className="featured-note">For each matchup with eligible markets, the page builds 3-leg, 6-leg, and 10-leg candidates. It favors the strongest market-implied chance within each tier’s fresh standalone ask range (20¢–50¢, 25¢–55¢, and 30¢–60¢), leaving room for meaningful theoretical payout without leaning on penny-priced contracts. Empty tiers retry across Kalshi and Polymarket US with companion games from supported sports. Payouts compound individual asks; they are estimates, not venue quotes or promises. Probabilities are market-implied, not calibrated forecasts.</p>
         </>}
         {view === "dashboard" && <>
           <Intro title="Sports market overview." copy="Real schedules, contract availability, and your latest research in one place." aside={when(new Date().toISOString(), false)} />
@@ -385,6 +403,16 @@ function Metric({ label, value, detail, icon: Icon }: { label: string; value: st
 }
 function SourceRow({ source }: { source: SourceStatus }) {
   return <div className="source-row"><span className={"status-dot " + source.status} /><div><strong>{source.name}</strong><p>{source.message}</p><small>{source.error && <>{source.error} · </>}{source.fetchedAt ? "Fetched " + when(source.fetchedAt) : "No fetch time"} · {source.count} records{source.cached ? " · cached" : ""}</small></div><span className={"source-status " + source.status}>{source.status}</span></div>;
+}
+function PremadeTierCard({ tier, game, games, onSave }: { tier: PremadeComboTier; game: Game; games: Game[]; onSave: (combo: Combo) => void }) {
+  const combo = tier.combo;
+  return <section className={"premade-tier" + (combo ? " has-combo" : "") }>
+    <header className="premade-tier-header"><div><strong>{tier.label}</strong><small>{tier.legs ? `${tier.legs} legs · range ${tier.minLegs}–${tier.maxLegs}` : `${tier.minLegs}–${tier.maxLegs} legs`}</small></div>{combo && <strong className="tier-payout">{payoutMultiple(combo.indicativePayoutMultiple)} <small>indicative</small></strong>}</header>
+    {combo ? <>
+      <div className="premade-tier-metrics"><span>Market-implied chance <strong>{pctPrecise(combo.probability)}</strong></span><span>Standalone asks <strong>{combo.legs.map((leg) => cents(leg.entryPrice)).join(" + ")}</strong></span></div>
+      <details className="premade-tier-details"><summary>View {combo.legs.length} verified legs</summary><div className="featured-combo-legs">{combo.legs.map((leg) => <div key={leg.id} className={leg.gameId === game.id ? "anchor-leg" : "support-leg"}><span>{leg.selection}</span><small>{leg.gameId === game.id ? "This matchup" : legEvent(leg, games)} · {venueName(leg.venue)} · {cents(leg.entryPrice)} standalone ask</small></div>)}</div><button className="secondary-button" onClick={() => onSave(combo)}><Bookmark size={15} /> Save this combo</button></details>
+    </> : <p className="premade-tier-empty">{tier.reason || "Not enough distinct, price-qualified games are available for this tier."}</p>}
+  </section>;
 }
 function GameDetail({ game, markets, onUse }: { game?: Game; markets: Market[]; onUse: (id: string) => void }) {
   if (!game) return <section className="panel game-detail-panel"><Empty icon={BarChart3} title="Select a game" copy="Game details appear when the schedule returns an upcoming matchup." /></section>;

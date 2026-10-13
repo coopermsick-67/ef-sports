@@ -182,7 +182,7 @@ function source(id: SourceStatus["id"], started: number, count: number, errors: 
     "polymarket-us": ["Polymarket US", "Public gateway; capped at 4 requests/second per warm worker, 60-second quote cache. HTTP 429 cooldown respected.", "https://docs.polymarket.us/api-reference/introduction"],
     "polymarket-global": ["Polymarket Global", "Gamma read-only API; bounded pagination, capped at 4 requests/second per warm worker, 60-second cache; stops on 429.", "https://docs.polymarket.com/market-data/discover-markets"],
     mlb: ["MLB Stats", "Public schedule feed. No guaranteed published SLA or numeric limit; 5-minute cache.", "https://statsapi.mlb.com/api/v1/schedule"],
-    espn: ["ESPN schedules", "Public scoreboard feed; undocumented API, no guaranteed SLA. Concurrency 4; 5-minute cache.", "https://www.espn.com/"],
+    espn: ["ESPN schedules", "Public scoreboard feed; undocumented API, no guaranteed SLA. Concurrency 8; 5-minute cache.", "https://www.espn.com/"],
   };
   return { id, name: info[id][0], status: errors.length ? count ? "partial" : "unavailable" : "connected", fetchedAt: new Date().toISOString(), count, message, cached, latencyMs: Date.now() - started, rateLimit: info[id][1], documentationUrl: info[id][2], ...(errors.length ? { error: [...new Set(errors)].slice(0, 3).join("; ") } : {}) };
 }
@@ -235,7 +235,7 @@ async function schedules(query: CatalogQuery): Promise<{ games: Game[]; sources:
         found.push({ id: `espn:${sport}:${string(event.id)}`, sport, title: string(event.name) || `${away.name} at ${home.name}`, startsAt, status: status.completed ? "final" : status.state === "in" ? "live" : /postpon|cancel/i.test(string(status.name)) ? "postponed" : status.state === "pre" ? "scheduled" : "unknown", home, away, source: "espn", url: string(list(event.links)[0]?.href) || `https://www.espn.com/${paths[sport]?.split("/")[1]}/game/_/gameId/${string(event.id)}`, fetchedAt: response.fetchedAt });
       }
       return { games: found, cached: response.cached };
-    });
+    }, 8);
     const errors = results.filter(r => r.status === "rejected").map(r => errorText((r as PromiseRejectedResult).reason));
     const found = results.flatMap(r => r.status === "fulfilled" ? r.value.games : []);
     games.push(...found);
@@ -475,5 +475,39 @@ export async function getCatalog(query: CatalogQuery): Promise<Catalog> {
   return {
     markets, games: schedule.games, sources: [...schedule.sources, ...results.map(r => r.source)], fetchedAt: new Date().toISOString(),
     warnings: [...new Set([...schedule.warnings, ...results.flatMap(r => r.warnings), ...(unmapped ? [`${unmapped} contracts have venue event identities only; schedule matching was not unique or unavailable.`] : []), "Probabilities are market-implied estimates from bid/ask midpoints. No independently calibrated predictive model is connected."])],
+  };
+}
+
+/**
+ * Broader, US-only catalog used to recover empty premade matchup cards. Kalshi
+ * is limited to the anchor sport while Polymarket US supplies companion games
+ * across the supported sports. Global read-only contracts are never included.
+ */
+export async function getPremadeCatalog(query: CatalogQuery, anchorSport: Sport): Promise<Catalog> {
+  parseCatalogQuery(new URLSearchParams({ sports: query.sports.join(","), start: query.start, end: query.end, venue: "kalshi" }));
+  const schedule = await schedules(query);
+  const activeSports = query.sports.filter(sport => schedule.games.some(game =>
+    game.sport === sport && (game.status === "scheduled" || game.status === "live")));
+  const companionQuery = { ...query, sports: activeSports.length ? activeSports : query.sports };
+  const [kalshiResult, polymarketResult] = await Promise.all([
+    kalshi({ ...query, sports: [anchorSport] }, schedule.games),
+    polymarketUS(companionQuery, schedule.games),
+  ]);
+  const results = [kalshiResult, polymarketResult];
+  const markets = [...new Map(results.flatMap(result => result.markets).map(m => [`${m.venue}:${m.id}`, m])).values()]
+    .sort((a, b) => Date.parse(a.startsAt) - Date.parse(b.startsAt));
+  const unmapped = markets.filter(m => !m.gameId).length;
+  return {
+    markets,
+    games: schedule.games,
+    sources: [...schedule.sources, ...results.map(result => result.source)],
+    fetchedAt: new Date().toISOString(),
+    warnings: [...new Set([
+      ...schedule.warnings,
+      ...results.flatMap(result => result.warnings),
+      ...(unmapped ? [`${unmapped} contracts have venue event identities only; schedule matching was not unique or unavailable.`] : []),
+      "Premade recovery may pair verified contracts from Kalshi and Polymarket US. Global read-only contracts are excluded.",
+      "Probabilities are market-implied estimates from bid/ask midpoints. No independently calibrated predictive model is connected.",
+    ])],
   };
 }

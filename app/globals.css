@@ -361,6 +361,20 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .game-combo-metrics small,.game-combo-metrics strong { display: block; }
 .game-combo-metrics small { min-height: 25px; color: #a8b8c9; font-size: 10px; line-height: 1.3; }
 .game-combo-metrics strong { margin-top: 4px; color: #d3ff8b; font-size: 18px; }
+.game-combo-tiers { display: grid; gap: 9px; margin-top: 12px; }
+.premade-tier { min-width: 0; padding: 12px; border: 1px solid #34485b; border-radius: 5px; background: #142230; }
+.premade-tier-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.premade-tier-header > div { display: grid; gap: 4px; }
+.premade-tier-header > div strong { color: #f2f7fc; font-size: 13px; }
+.premade-tier-header > div small { color: #a9b8ca; font-size: 11px; }
+.premade-tier-header .tier-payout { color: #d3ff8b; font-size: 17px; white-space: nowrap; }
+.tier-payout small { display: block; color: #a9b8ca; font-size: 9px; font-weight: 500; text-align: right; }
+.premade-tier-metrics { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-top: 10px; color: #a9b8ca; font-size: 10px; }
+.premade-tier-metrics strong { display: block; margin-top: 3px; color: #f2f7fc; font-size: 12px; }
+.premade-tier-details { margin-top: 10px; border-top: 1px solid #2b4053; padding-top: 9px; }
+.premade-tier-details summary { color: #c2d0de; cursor: pointer; font-size: 11px; }
+.premade-tier-details .featured-combo-legs { margin: 10px 0; }
+.premade-tier-empty { margin: 10px 0 0; color: #a9b8ca; font-size: 11px; line-height: 1.45; }
 .featured-combo-legs .anchor-leg { border-color: #a9d96e; }
 .featured-combo-legs .support-leg { border-color: #5e7788; }
 .game-combo-footer { display: flex; justify-content: space-between; align-items: center; gap: 9px; padding-top: 10px; border-top: 1px solid #2b4052; color: #a9b8ca; font-size: 10px; }
