@@ -104,6 +104,15 @@ function days(start: string, end: string): string[] {
   return output;
 }
 
+function shiftDate(day: string, offset: number): string {
+  return new Date(Date.parse(`${day}T12:00:00Z`) + offset * 86_400_000).toISOString().slice(0, 10);
+}
+
+function inDateWindow(startsAt: string, query: CatalogQuery): boolean {
+  const day = newYorkDate(new Date(startsAt));
+  return day >= query.start && day <= query.end;
+}
+
 export function parseCatalogQuery(search: URLSearchParams): CatalogQuery {
   const sports = [...new Set((search.get("sports") || "MLB,NFL,NBA,NCAAF,NCAAB").split(",").map(v => v.trim().toUpperCase()))];
   if (sports.length === 0 || sports.some(s => !SPORTS.includes(s as Sport))) throw new Error(`Choose sports from ${SPORTS.join(", ")}.`);
@@ -185,16 +194,18 @@ async function schedules(query: CatalogQuery): Promise<{ games: Game[]; sources:
   const warnings: string[] = [];
   if (query.sports.includes("MLB")) {
     try {
-      const response = await json(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${query.start}&endDate=${query.end}&hydrate=team`, 300_000);
+      // Provider calendar dates may use a different zone from the user's New York
+      // date. Fetch adjacent days, then keep only actual starts inside their range.
+      const response = await json(`https://statsapi.mlb.com/api/v1/schedule?sportId=1&startDate=${shiftDate(query.start, -1)}&endDate=${shiftDate(query.end, 1)}&hydrate=team`, 300_000);
       for (const date of list(object(response.data).dates)) for (const raw of list(date.games)) {
         const sides = object(raw.teams);
         const state = string(object(raw.status).abstractGameState);
         const detail = string(object(raw.status).detailedState);
         const startsAt = iso(raw.gameDate);
-        if (!startsAt) continue;
+        if (!startsAt || !inDateWindow(startsAt, query)) continue;
         const away = team(object(object(sides.away).team), "mlb");
         const home = team(object(object(sides.home).team), "mlb");
-        games.push({ id: `mlb:${string(raw.gamePk)}`, sport: "MLB", title: `${away.name} at ${home.name}`, startsAt, status: /postpon|cancel/i.test(detail) ? "postponed" : state === "Final" ? "final" : state === "Live" ? "live" : "scheduled", away, home, source: "mlb", url: `https://www.mlb.com/gameday/${string(raw.gamePk)}`, fetchedAt: new Date().toISOString() });
+        games.push({ id: `mlb:${string(raw.gamePk)}`, sport: "MLB", title: `${away.name} at ${home.name}`, startsAt, status: /postpon|cancel/i.test(detail) ? "postponed" : state === "Final" ? "final" : state === "Live" ? "live" : "scheduled", away, home, source: "mlb", url: `https://www.mlb.com/gameday/${string(raw.gamePk)}`, fetchedAt: response.fetchedAt });
       }
       sources.push(source("mlb", started, games.length, [], response.cached, "Official MLB schedules and team identities."));
     } catch (error) {
@@ -206,7 +217,7 @@ async function schedules(query: CatalogQuery): Promise<{ games: Game[]; sources:
   const other = query.sports.filter(s => s !== "MLB");
   if (other.length) {
     const paths: Partial<Record<Sport, string>> = { NFL: "football/nfl", NCAAF: "football/college-football", NBA: "basketball/nba", NCAAB: "basketball/mens-college-basketball" };
-    const jobs = other.flatMap(sport => days(query.start, query.end).map(day => ({ sport, day })));
+    const jobs = other.flatMap(sport => days(shiftDate(query.start, -1), shiftDate(query.end, 1)).map(day => ({ sport, day })));
     const results = await pooled(jobs, async ({ sport, day }) => {
       const group = sport === "NCAAF" ? "&groups=80" : sport === "NCAAB" ? "&groups=50" : "";
       const response = await json(`https://site.api.espn.com/apis/site/v2/sports/${paths[sport]}/scoreboard?dates=${day.replaceAll("-", "")}&limit=1000${group}`, 300_000);
@@ -217,11 +228,11 @@ async function schedules(query: CatalogQuery): Promise<{ games: Game[]; sources:
         const homeRaw = object(competitors.find(c => c.homeAway === "home")?.team);
         const awayRaw = object(competitors.find(c => c.homeAway === "away")?.team);
         const startsAt = iso(event.date);
-        if (!startsAt || !homeRaw.id || !awayRaw.id) continue;
+        if (!startsAt || !inDateWindow(startsAt, query) || !homeRaw.id || !awayRaw.id) continue;
         const home = team(homeRaw, `espn:${sport}`);
         const away = team(awayRaw, `espn:${sport}`);
         const status = object(object(event.status).type);
-        found.push({ id: `espn:${sport}:${string(event.id)}`, sport, title: string(event.name) || `${away.name} at ${home.name}`, startsAt, status: status.completed ? "final" : status.state === "in" ? "live" : /postpon|cancel/i.test(string(status.name)) ? "postponed" : status.state === "pre" ? "scheduled" : "unknown", home, away, source: "espn", url: string(list(event.links)[0]?.href) || `https://www.espn.com/${paths[sport]?.split("/")[1]}/game/_/gameId/${string(event.id)}`, fetchedAt: new Date().toISOString() });
+        found.push({ id: `espn:${sport}:${string(event.id)}`, sport, title: string(event.name) || `${away.name} at ${home.name}`, startsAt, status: status.completed ? "final" : status.state === "in" ? "live" : /postpon|cancel/i.test(string(status.name)) ? "postponed" : status.state === "pre" ? "scheduled" : "unknown", home, away, source: "espn", url: string(list(event.links)[0]?.href) || `https://www.espn.com/${paths[sport]?.split("/")[1]}/game/_/gameId/${string(event.id)}`, fetchedAt: response.fetchedAt });
       }
       return { games: found, cached: response.cached };
     });

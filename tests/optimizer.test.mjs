@@ -73,11 +73,44 @@ test("normalized binary midpoint probabilities and dependence bounds", () => {
 
 test("selects highest probability irrespective of price, payout, or an edge target", () => {
   const result = run([market("high", 0.85), market("middle", 0.75), market("cheap", 0.55)]);
+  assert.equal(result.combos.length, 3);
+  assert.ok(result.combos.every((combo) => combo.legs.length === 2));
   assert.deepEqual(result.combos[0].legs.map((leg) => leg.marketId).sort(), ["high", "middle"]);
   close(result.combos[0].probability, 0.85 * 0.75);
+  // These expensive favorites imply less than a 2x ask-price reference multiplier.
+  // They must still rank first: there is no hidden payout floor.
+  assert.ok(1 / result.combos[0].legs.reduce((product, leg) => product * leg.entryPrice, 1) < 2);
+  assert.equal(result.diagnostics.algorithm, "exact-k-best-dynamic-programming");
+  assert.equal(result.diagnostics.ranking, "winning-probability");
   assert.equal(result.combos[0].estimatedReturn, null);
   assert.equal(result.combos[0].executableQuote, null);
   assert.equal(result.combos[0].modelStatus, "unavailable");
+});
+
+test("changing standalone ask prices without changing marginals does not change ranking", () => {
+  const narrow = [market("highest", 0.9), market("middle", 0.8), market("lowest", 0.7)];
+  const wide = [
+    market("highest", 0.9, { yesBid: 0.81, yesAsk: 0.99, noBid: 0.01, noAsk: 0.19 }),
+    ...narrow.slice(1),
+  ];
+  const baseline = run(narrow);
+  const changed = run(wide);
+  assert.deepEqual(changed.combos.map((combo) => combo.legs.map((leg) => leg.id)),
+    baseline.combos.map((combo) => combo.legs.map((leg) => leg.id)));
+  changed.combos.forEach((combo, index) => close(combo.probability, baseline.combos[index].probability));
+  assert.equal(changed.combos[0].legs.find((leg) => leg.marketId === "highest").entryPrice, 0.99);
+});
+
+test("returns the exact requested number of legs and probability optimum for every count from one through ten", () => {
+  const probabilities = Array.from({ length: 10 }, (_, index) => 0.55 + index * 0.04);
+  const markets = probabilities.map((p, index) => market(`count-${index}`, p));
+  for (let legs = 1; legs <= 10; legs++) {
+    const result = run(markets, { legs });
+    assert.equal(result.combos.length, 3);
+    assert.ok(result.combos.every((combo) => combo.legs.length === legs));
+    const expected = [...probabilities].sort((a, b) => b - a).slice(0, legs).reduce((product, p) => product * p, 1);
+    close(result.combos[0].probability, expected);
+  }
 });
 
 test("considers the NO selection and never combines contradictory sides", () => {
@@ -199,6 +232,8 @@ test("exact top-three dynamic programming agrees with exhaustive enumeration", (
     const random = () => { value = (value * 48271) % 2147483647; return value / 2147483647; };
     const markets = Array.from({ length: 12 }, (_, i) => market(`m-${i}`, 0.1 + random() * 0.8, { gameId: `g-${Math.floor(i / 2)}` }));
     const result = run(markets, { legs: 3 });
+    assert.equal(result.combos.length, 3);
+    assert.ok(result.combos.every((combo) => combo.legs.length === 3));
     const groups = new Map();
     for (const item of markets) {
       const p = estimateBinaryMarket(item).yes;
@@ -226,6 +261,8 @@ test("POST handler validates dates, sports, and the ten-leg maximum", async () =
     { ...request, legs: 11 },
     { ...request, legs: 2.5 },
     { ...request, maxSpread: 2 },
+    { ...request, minReferencePayout: 3 },
+    { ...request, anchorGameId: "forced-game" },
   ]) {
     const response = await POST(new Request("http://localhost/api/combos", { method: "POST", body: JSON.stringify(invalid) }));
     assert.equal(response.status, 400);

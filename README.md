@@ -40,7 +40,7 @@ node --test tests\optimizer.test.mjs
 npx tsc --noEmit
 ```
 
-The optimizer tests cover winning-probability ranking, yes/no selection, freshness and settlement filtering, date boundaries in New York, sports and event constraints, dependence bounds, 10-leg inputs, API validation and exact top-three enumeration (17 passing tests).
+The optimizer tests cover winning-probability ranking independent of standalone price, yes/no selection, freshness and settlement filtering, date boundaries in New York, sports and event constraints, dependence bounds, exact 1–10 leg outputs, API validation and exact top-three enumeration (19 passing tests).
 
 ## Architecture
 

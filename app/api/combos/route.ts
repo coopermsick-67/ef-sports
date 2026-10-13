@@ -21,8 +21,6 @@ const schema = z.object({
   excluded: z.array(z.string().min(1).max(500)).max(500).optional(),
   gameIds: z.array(z.string().min(1).max(500)).max(500).optional(),
   requireEachSport: z.boolean().optional(),
-  minReferencePayout: z.number().finite().min(1).max(100).optional(),
-  anchorGameId: z.string().min(1).max(500).optional(),
 }).strict().refine((value) => {
   const duration = (Date.parse(value.end) - Date.parse(value.start)) / 86_400_000;
   return duration >= 0 && duration <= 30;
