@@ -151,7 +151,8 @@ test("one canonical game across venues yields only one leg", () => {
 test("unmatched events cannot bypass physical game deduplication in any venue", () => {
   for (const venue of ["all", "kalshi"]) {
     const result = run([market("unknown", 0.9, { gameId: undefined }), market("mapped", 0.8)], { venue });
-    assert.equal(result.combos.length, 0);
+    assert.ok(result.combos.length > 0);
+    assert.ok(result.combos.every((combo) => combo.legs.every((leg) => leg.marketId === "mapped")));
     assert.equal(result.diagnostics.rejected["unmapped-game"], 1);
   }
 });
@@ -186,11 +187,12 @@ test("ten legs are allowed even when the joint chance is low; eleven are rejecte
   assert.throws(() => run(markets, { legs: 0 }), RangeError);
 });
 
-test("insufficient independent events returns a useful empty result", () => {
-  const result = run([market("one", 0.9), market("prop", 0.95, { gameId: "game-one" })]);
-  assert.equal(result.combos.length, 0);
+test("insufficient independent events returns the best shorter combo", () => {
+  const result = run([market("one", 0.9), market("prop", 0.95, { gameId: "game-one" })], { legs: 3 });
+  assert.equal(result.combos.length, 3);
+  assert.ok(result.combos.every((combo) => combo.legs.length === 1));
   assert.equal(result.diagnostics.availableLegs, 1);
-  assert.ok(result.warnings.some((warning) => warning.includes("Only 1 eligible distinct events")));
+  assert.ok(result.warnings.some((warning) => warning.includes("Showing the best 1-leg combo")));
 });
 
 test("missing quote data and unverified settlement are not presented as modeled confidence", () => {
@@ -257,7 +259,6 @@ test("POST handler validates dates, sports, and the ten-leg maximum", async () =
     { ...request, start: "2026-02-30" },
     { ...request, start: "2026-10-20", end: "2026-10-13" },
     { ...request, end: "2026-12-20" },
-    { ...request, sports: [] },
     { ...request, legs: 11 },
     { ...request, legs: 2.5 },
     { ...request, maxSpread: 2 },
@@ -268,6 +269,16 @@ test("POST handler validates dates, sports, and the ten-leg maximum", async () =
     assert.equal(response.status, 400);
     assert.ok((await response.json()).error.length > 0);
   }
+});
+
+test("POST treats an empty sport selection as all supported sports", async () => {
+  fixtureProvider.setCatalog(catalog([
+    market("first", 0.8, { fetchedAt: new Date().toISOString() }),
+    market("second", 0.7, { fetchedAt: new Date().toISOString() }),
+  ]));
+  const response = await POST(new Request("http://localhost/api/combos", { method: "POST", body: JSON.stringify({ ...request, sports: [] }) }));
+  assert.equal(response.status, 200);
+  assert.ok((await response.json()).combos.length > 0);
 });
 
 test("POST returns ranked research combinations and explicitly no executable quote", async () => {

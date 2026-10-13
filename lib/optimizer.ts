@@ -203,12 +203,17 @@ export function optimizeCombos(
       modelStatus: "unavailable", rejected,
     },
   };
+  // Prefer a smaller valid combo to returning no result when the feed has fewer
+  // eligible games than requested. The warning keeps the adjustment explicit.
+  const targetLegs = Math.min(request.legs, groups.size);
   if (groups.size < request.legs) {
-    warnings.push(`Only ${groups.size} eligible distinct events are available for ${request.legs} requested legs. Expand sports, dates, games, or filters.`);
-    return result;
+    warnings.push(groups.size
+      ? `Only ${groups.size} eligible distinct events are available for ${request.legs} requested legs. Showing the best ${targetLegs}-leg combo available; expand sports, dates, or games for more legs.`
+      : `No eligible games are available for the current sport, date, venue, and market settings. Expand the search or try another venue.`);
   }
-  if (request.requireEachSport && selectedSports.length > request.legs) {
-    warnings.push("There are more required sports than legs. Increase the leg count or select fewer sports.");
+  if (targetLegs === 0) return result;
+  if (request.requireEachSport && selectedSports.length > targetLegs) {
+    warnings.push(`There are more required sports than the ${targetLegs} available legs. Select fewer sports or broaden the search.`);
     return result;
   }
   let states = new Map<string, PartialCombo[]>([["0:0:0", [{ legs: [], logProbability: 0, sportsMask: 0, hasAnchor: false, key: "" }]]]);
@@ -223,7 +228,7 @@ export function optimizeCombos(
     for (const paths of states.values()) {
       for (const path of paths) {
         put(`${path.legs.length}:${path.sportsMask}:${Number(path.hasAnchor)}`, path);
-        if (path.legs.length >= request.legs) continue;
+        if (path.legs.length >= targetLegs) continue;
         for (const leg of candidates) {
           const sportsMask = request.requireEachSport
             ? path.sportsMask | (1 << selectedSports.indexOf(leg.sport)) : 0;
@@ -239,7 +244,7 @@ export function optimizeCombos(
     states = next;
   }
   const fullMask = request.requireEachSport ? (1 << selectedSports.length) - 1 : 0;
-  const winners = states.get(`${request.legs}:${fullMask}:${Number(Boolean(request.anchorGameId))}`) ?? [];
+  const winners = states.get(`${targetLegs}:${fullMask}:${Number(Boolean(request.anchorGameId))}`) ?? [];
   if (!winners.length) warnings.push("No combination satisfies all of the selected sports and event constraints.");
   result.combos = winners.map((path, index) => {
     const marginals = path.legs.map((leg) => leg.probability);

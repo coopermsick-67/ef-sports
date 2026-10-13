@@ -9,7 +9,10 @@ const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD dates.").re
 }, "Choose a real calendar date.");
 
 const schema = z.object({
-  sports: z.array(z.enum(SPORTS)).min(1, "Select at least one sport.").max(5).transform((sports) => [...new Set(sports)]),
+  sports: z.array(z.enum(SPORTS)).max(5).transform((sports) => {
+    const selected = [...new Set(sports)];
+    return selected.length ? selected : [...SPORTS];
+  }),
   start: date,
   end: date,
   venue: z.enum(["all", "kalshi", "polymarket-us", "polymarket-global"]).default("kalshi"),
