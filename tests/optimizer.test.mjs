@@ -17,10 +17,12 @@ for (const name of ["models", "optimizer"]) {
 }
 await writeFile(join(compiled, "types.mjs"), 'export const SPORTS = ["MLB", "NFL", "NCAAF", "NBA", "NCAAB"];');
 await writeFile(join(compiled, "providers.mjs"), `
-  let fixture; let failure = false;
-  export function setCatalog(value) { fixture = value; failure = false; }
+  let fixture; let failure = false; let premade = false;
+  export function setCatalog(value) { fixture = value; failure = false; premade = false; }
   export function fail() { failure = true; }
   export async function getCatalog() { if (failure) throw new Error("private provider failure"); return fixture; }
+  export async function getPremadeCatalog() { if (failure) throw new Error("private provider failure"); premade = true; return fixture; }
+  export function usedPremadeCatalog() { return premade; }
 `);
 const routeSource = await readFile(new URL("../app/api/combos/route.ts", import.meta.url), "utf8");
 const routeOutput = ts.transpileModule(routeSource, {
@@ -85,6 +87,21 @@ test("selects highest probability irrespective of price, payout, or an edge targ
   assert.equal(result.combos[0].estimatedReturn, null);
   assert.equal(result.combos[0].executableQuote, null);
   assert.equal(result.combos[0].modelStatus, "unavailable");
+});
+
+test("payout ranking uses valid standalone asks while preserving the lower market-implied chance", () => {
+  const anchor = market("anchor", 0.7, { gameId: "game-anchor" });
+  const companion = market("companion", 0.4, { gameId: "game-companion" });
+  const result = optimizeCombos(catalog([anchor, companion]), { ...request, legs: 2, anchorGameId: "game-anchor" }, {
+    now, limit: 1, ranking: "payout-potential", minEntryPrice: 0.05, maxEntryPrice: 0.85,
+  });
+  const combo = result.combos[0];
+  assert.deepEqual(combo.legs.map((leg) => leg.side).sort(), ["no", "yes"]);
+  assert.ok(combo.legs.every((leg) => leg.entryPrice >= 0.05 && leg.entryPrice <= 0.85));
+  close(combo.probability, 0.12);
+  close(combo.indicativePayoutMultiple, 1 / (0.305 * 0.405));
+  assert.equal(result.diagnostics.ranking, "payout-potential");
+  assert.match(combo.warnings.join(" "), /not a quoted combo payout or a guarantee/);
 });
 
 test("changing standalone ask prices without changing marginals does not change ranking", () => {
@@ -323,6 +340,49 @@ test("batch route returns one anchored result for each requested matchup", async
   for (const gameId of ["game-first", "game-second"]) {
     assert.equal(result.gameCombos[gameId].combos.length, 1);
     assert.ok(result.gameCombos[gameId].combos[0].legs.some((leg) => leg.gameId === gameId));
+  }
+});
+
+test("premade recovery combines verified US venue legs across sports", async () => {
+  const current = new Date().toISOString();
+  fixtureProvider.setCatalog(catalog([
+    market("anchor", 0.72, { gameId: "game-anchor", sport: "MLB", venue: "kalshi", fetchedAt: current }),
+    market("companion", 0.67, { gameId: "game-companion", sport: "NFL", venue: "polymarket-us", fetchedAt: current }),
+  ]));
+  const response = await POST(new Request("http://localhost/api/combos", {
+    method: "POST",
+    body: JSON.stringify({ ...request, sports: ["MLB", "NFL", "NBA", "NCAAF", "NCAAB"], venue: "all", anchorSport: "MLB", anchorGameIds: ["game-anchor"] }),
+  }));
+  assert.equal(response.status, 200);
+  assert.equal(fixtureProvider.usedPremadeCatalog(), true);
+  const result = await response.json();
+  const combo = result.gameCombos["game-anchor"].combos[0];
+  assert.deepEqual(combo.legs.map((leg) => leg.venue).sort(), ["kalshi", "polymarket-us"]);
+  assert.ok(combo.legs.some((leg) => leg.gameId === "game-anchor"));
+});
+
+test("tiered premade cards return unique 3, 6, and 10 leg combos within tier price ranges", async () => {
+  const current = new Date().toISOString();
+  const markets = Array.from({ length: 10 }, (_, index) => market(`tier-${index}`, 0.35 + index * 0.025, {
+    gameId: `game-tier-${index}`, sport: index % 2 ? "NFL" : "MLB", venue: index % 2 ? "polymarket-us" : "kalshi", fetchedAt: current,
+  }));
+  fixtureProvider.setCatalog(catalog(markets));
+  const response = await POST(new Request("http://localhost/api/combos", {
+    method: "POST",
+    body: JSON.stringify({ ...request, sports: ["MLB", "NFL"], venue: "all", anchorSport: "MLB", anchorGameIds: ["game-tier-0"], tiered: true }),
+  }));
+  assert.equal(response.status, 200);
+  const gameResult = (await response.json()).gameCombos["game-tier-0"];
+  assert.deepEqual(gameResult.tiers.map((tier) => tier.legs), [3, 6, 10]);
+  assert.ok(gameResult.tiers.every((tier) => tier.combo));
+  assert.equal(new Set(gameResult.tiers.map((tier) => tier.combo.id)).size, 3);
+  for (const tier of gameResult.tiers) {
+    assert.equal(tier.combo.legs.length, tier.legs);
+    assert.ok(tier.combo.legs.some((leg) => leg.gameId === "game-tier-0"));
+    assert.ok(tier.combo.indicativePayoutMultiple > 1);
+    const minAsk = tier.id === "short" ? 0.20 : tier.id === "medium" ? 0.25 : 0.30;
+    const maxAsk = tier.id === "short" ? 0.50 : tier.id === "medium" ? 0.55 : 0.60;
+    assert.ok(tier.combo.legs.every((leg) => leg.entryPrice >= minAsk && leg.entryPrice <= maxAsk));
   }
 });
 

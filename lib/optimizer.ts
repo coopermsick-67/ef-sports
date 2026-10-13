@@ -33,6 +33,7 @@ export interface Combo {
   rank: number;
   legs: ComboLeg[];
   probability: number;
+  indicativePayoutMultiple: number | null;
   probabilityBasis: "market-implied-independent";
   lowerBound: number;
   upperBound: number;
@@ -58,11 +59,23 @@ export interface ComboResult {
     requestedLegs: number;
     availableLegs: number;
     algorithm: "exact-k-best-dynamic-programming";
-    ranking: "winning-probability";
+    ranking: "winning-probability" | "payout-potential";
     modelStatus: "unavailable";
     rejected: Record<string, number>;
   };
 }
+
+export interface PremadeComboTier {
+  id: "short" | "medium" | "long";
+  label: string;
+  minLegs: number;
+  maxLegs: number;
+  legs: number;
+  combo: Combo | null;
+  reason?: string;
+}
+
+export interface PremadeGameResult { tiers: PremadeComboTier[] }
 
 const FRESHNESS_MS = 5 * 60 * 1000;
 const dateFormatter = new Intl.DateTimeFormat("en-CA", {
@@ -86,13 +99,16 @@ function eventGroup(market: Market): string {
 interface PartialCombo {
   legs: ComboLeg[];
   logProbability: number;
+  logPayoutPotential: number;
   sportsMask: number;
   hasAnchor: boolean;
   key: string;
 }
 
-function keepBest(options: PartialCombo[], count: number): PartialCombo[] {
-  options.sort((a, b) => b.logProbability - a.logProbability || a.key.localeCompare(b.key));
+function keepBest(options: PartialCombo[], count: number, ranking: "winning-probability" | "payout-potential"): PartialCombo[] {
+  options.sort((a, b) => (ranking === "payout-potential"
+    ? b.logPayoutPotential - a.logPayoutPotential || b.logProbability - a.logProbability
+    : b.logProbability - a.logProbability || b.logPayoutPotential - a.logPayoutPotential) || a.key.localeCompare(b.key));
   const seen = new Set<string>();
   return options.filter((option) => {
     if (seen.has(option.key)) return false;
@@ -104,18 +120,19 @@ function keepBest(options: PartialCombo[], count: number): PartialCombo[] {
 /**
  * Exact k-best grouped dynamic programming. Each group contributes zero or one selection;
  * retaining k paths per (count, sport mask) is exact because all share the same future choices.
- * This optimizes the explicitly declared independence proxy, not unknown true joint probability.
+ * Rankings can use the declared independence proxy or standalone ask price; neither is a calibrated forecast.
  */
 export function optimizeCombos(
   catalog: Catalog,
   request: ComboRequest,
-  options: { now?: number; limit?: number } = {},
+  options: { now?: number; limit?: number; ranking?: "winning-probability" | "payout-potential"; minEntryPrice?: number; maxEntryPrice?: number } = {},
 ): ComboResult {
   if (!Number.isInteger(request.legs) || request.legs < 1 || request.legs > 10) {
     throw new RangeError("Choose between 1 and 10 legs.");
   }
   const now = options.now ?? Date.now();
   const limit = Math.max(1, Math.min(10, Math.floor(options.limit ?? 3)));
+  const ranking = options.ranking ?? "winning-probability";
   const rejected: Record<string, number> = {};
   const reject = (reason: string) => { rejected[reason] = (rejected[reason] ?? 0) + 1; };
   const selectedSports = [...new Set(request.sports)];
@@ -170,6 +187,11 @@ export function optimizeCombos(
       }
       const probability = side === "yes" ? estimate.yes : estimate.no;
       const entryPrice = side === "yes" ? market.yesAsk : market.noAsk;
+      if ((options.minEntryPrice !== undefined || options.maxEntryPrice !== undefined || ranking === "payout-potential") && (entryPrice == null || entryPrice <= 0 || entryPrice >= 1 ||
+          (options.minEntryPrice !== undefined && entryPrice < options.minEntryPrice) ||
+          (options.maxEntryPrice !== undefined && entryPrice > options.maxEntryPrice))) {
+        reject("entry-price-band"); continue;
+      }
       selections.push({
         ...market,
         id: `${market.id}:${side}`,
@@ -181,7 +203,7 @@ export function optimizeCombos(
         entryPrice,
         spread,
         eventGroup: group,
-        reason: `${(probability * 100).toFixed(1)}% market-implied marginal; ranked solely by the probability proxy.`,
+        reason: `${(probability * 100).toFixed(1)}% market-implied marginal; ${ranking === "payout-potential" ? "selected for quoted-price payout potential" : "ranked by the probability proxy"}.`,
       });
     }
     if (!selections.length) continue;
@@ -192,6 +214,7 @@ export function optimizeCombos(
 
   const warnings = [...catalog.warnings];
   warnings.push("No calibrated sports model is connected. Probabilities are normalized market prices, not independent forecasts.");
+  if (ranking === "payout-potential") warnings.push("Payout ranking compounds individual contract asks as an illustrative parlay multiple; no venue combo payout is quoted.");
   const availableLegs = Math.min(10, groups.size);
   const result: ComboResult = {
     combos: [],
@@ -199,7 +222,7 @@ export function optimizeCombos(
     diagnostics: {
       inputMarkets: catalog.markets.length, eligibleMarkets, candidateSelections,
       independentEventGroups: groups.size, requestedLegs: request.legs, availableLegs,
-      algorithm: "exact-k-best-dynamic-programming", ranking: "winning-probability",
+      algorithm: "exact-k-best-dynamic-programming", ranking,
       modelStatus: "unavailable", rejected,
     },
   };
@@ -216,7 +239,7 @@ export function optimizeCombos(
     warnings.push(`There are more required sports than the ${targetLegs} available legs. Select fewer sports or broaden the search.`);
     return result;
   }
-  let states = new Map<string, PartialCombo[]>([["0:0:0", [{ legs: [], logProbability: 0, sportsMask: 0, hasAnchor: false, key: "" }]]]);
+  let states = new Map<string, PartialCombo[]>([["0:0:0", [{ legs: [], logProbability: 0, logPayoutPotential: 0, sportsMask: 0, hasAnchor: false, key: "" }]]]);
   for (const [groupId, selections] of [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     const next = new Map<string, PartialCombo[]>();
     const put = (stateKey: string, path: PartialCombo) => next.set(stateKey, [...(next.get(stateKey) ?? []), path]);
@@ -224,7 +247,9 @@ export function optimizeCombos(
     const eventOptions = new Map<Sport, ComboLeg[]>();
     for (const selection of selections) eventOptions.set(selection.sport, [...(eventOptions.get(selection.sport) ?? []), selection]);
     const candidates = [...eventOptions.values()].flatMap((legs) =>
-      legs.sort((a, b) => b.probability - a.probability || a.id.localeCompare(b.id)).slice(0, limit));
+      legs.sort((a, b) => ranking === "payout-potential"
+        ? (a.entryPrice ?? 1) - (b.entryPrice ?? 1) || b.probability - a.probability || a.id.localeCompare(b.id)
+        : b.probability - a.probability || (a.entryPrice ?? 1) - (b.entryPrice ?? 1) || a.id.localeCompare(b.id)).slice(0, limit));
     for (const paths of states.values()) {
       for (const path of paths) {
         put(`${path.legs.length}:${path.sportsMask}:${Number(path.hasAnchor)}`, path);
@@ -235,12 +260,13 @@ export function optimizeCombos(
           const hasAnchor = path.hasAnchor || leg.gameId === request.anchorGameId;
           const key = path.key ? `${path.key}|${groupId}/${leg.id}` : `${groupId}/${leg.id}`;
           put(`${path.legs.length + 1}:${sportsMask}:${Number(hasAnchor)}`, {
-            legs: [...path.legs, leg], logProbability: path.logProbability + Math.log(leg.probability), sportsMask, hasAnchor, key,
+            legs: [...path.legs, leg], logProbability: path.logProbability + Math.log(leg.probability),
+            logPayoutPotential: path.logPayoutPotential - Math.log(leg.entryPrice ?? 1), sportsMask, hasAnchor, key,
           });
         }
       }
     }
-    for (const [stateKey, paths] of next) next.set(stateKey, keepBest(paths, limit));
+    for (const [stateKey, paths] of next) next.set(stateKey, keepBest(paths, limit, ranking));
     states = next;
   }
   const fullMask = request.requireEachSport ? (1 << selectedSports.length) - 1 : 0;
@@ -262,6 +288,7 @@ export function optimizeCombos(
       "This is a research combination. No executable venue combo or RFQ price has been obtained.",
       "Dependence bounds assume the market-implied marginals are correct; they do not measure model calibration or forecast error.",
     ];
+    if (ranking === "payout-potential") comboWarnings.push("The indicative multiple compounds individual contract asks; it is not a quoted combo payout or a guarantee.");
     if (repeatedTeams.length) comboWarnings.push(`Repeated teams across games: ${repeatedTeams.join(", ")}. Shared form, injuries, and scheduling can invalidate independence.`);
     if (path.legs.some((leg) => leg.matching !== "schedule-verified")) comboWarnings.push("Some events are identified only by the venue; schedule matching has not been independently verified.");
     const exceptional = [...new Set(path.legs.map((leg) => leg.settlement.exceptionalSettlement).filter(Boolean))];
@@ -271,6 +298,7 @@ export function optimizeCombos(
       rank: index + 1,
       legs: path.legs.sort((a, b) => a.startsAt.localeCompare(b.startsAt) || a.id.localeCompare(b.id)),
       probability: Math.exp(path.logProbability),
+      indicativePayoutMultiple: Math.exp(path.logPayoutPotential),
       probabilityBasis: "market-implied-independent",
       ...bounds,
       assumptions: [
