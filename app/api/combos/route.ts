@@ -23,10 +23,14 @@ const schema = z.object({
   requireEachSport: z.boolean().optional(),
   minReferencePayout: z.number().finite().min(1).max(100).optional(),
   anchorGameId: z.string().min(1).max(500).optional(),
+  anchorGameIds: z.array(z.string().min(1).max(500)).min(1).max(48).transform((ids) => [...new Set(ids)]).optional(),
 }).strict().refine((value) => {
   const duration = (Date.parse(value.end) - Date.parse(value.start)) / 86_400_000;
   return duration >= 0 && duration <= 30;
-}, { message: "Select an inclusive date range of 1 to 31 days.", path: ["end"] });
+}, { message: "Select an inclusive date range of 1 to 31 days.", path: ["end"] }).refine(
+  (value) => !(value.anchorGameId && value.anchorGameIds),
+  { message: "Use either one anchor game or a batch of anchor games.", path: ["anchorGameIds"] },
+);
 
 export async function POST(request: Request) {
   const headers = { "Cache-Control": "no-store", "X-Data-Timezone": "America/New_York" };
@@ -47,6 +51,14 @@ export async function POST(request: Request) {
   }
   try {
     const catalog = await getCatalog(parsed.data);
+    if (parsed.data.anchorGameIds) {
+      const { anchorGameIds, ...comboRequest } = parsed.data;
+      const gameCombos = Object.fromEntries(anchorGameIds.map((anchorGameId) => [
+        anchorGameId,
+        optimizeCombos(catalog, { ...comboRequest, anchorGameId }, { limit: 1 }),
+      ]));
+      return Response.json({ gameCombos, fetchedAt: catalog.fetchedAt }, { headers });
+    }
     const result = optimizeCombos(catalog, parsed.data);
     return Response.json({ ...result, fetchedAt: catalog.fetchedAt }, { headers });
   } catch {

@@ -79,8 +79,8 @@ export default function HomePage() {
   const [legs, setLegs] = useState(3);
   const [payoutTarget, setPayoutTarget] = useState(3);
   const [featuredSport, setFeaturedSport] = useState<Sport>("MLB");
-  const [featuredGameId, setFeaturedGameId] = useState<string | null>(null);
-  const [featuredResult, setFeaturedResult] = useState<ComboResult | null>(null);
+  const [featuredLimit, setFeaturedLimit] = useState(24);
+  const [featuredResults, setFeaturedResults] = useState<Record<string, ComboResult>>({});
   const [featuredBusy, setFeaturedBusy] = useState(false);
   const [featuredError, setFeaturedError] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -228,25 +228,33 @@ export default function HomePage() {
   }, [catalog, search, scannerCategory, sort]);
   const games = useMemo(() => (catalog?.games ?? []).filter((game) => game.status === "scheduled" || game.status === "live").sort((a, b) => a.startsAt.localeCompare(b.startsAt)), [catalog]);
   const featuredGames = useMemo(() => games.filter((game) => game.sport === featuredSport && game.status === "scheduled"), [games, featuredSport]);
-  const featuredGame = featuredGames.find((game) => game.id === featuredGameId) ?? featuredGames[0];
+  const visibleFeaturedGames = useMemo(() => featuredGames.slice(0, featuredLimit), [featuredGames, featuredLimit]);
+  const featuredResultKey = useCallback((game: Game) => `${catalog?.fetchedAt ?? "loading"}:${venue}:${game.id}`, [catalog?.fetchedAt, venue]);
   useEffect(() => {
-    if (view !== "game-combos" || !featuredGame || venue === "polymarket-global") return;
+    if (view !== "game-combos" || !visibleFeaturedGames.length || venue === "polymarket-global") return;
+    const anchorGameIds = visibleFeaturedGames.filter((game) => !featuredResults[featuredResultKey(game)]).slice(0, 48).map((game) => game.id);
+    if (!anchorGameIds.length) return;
     const controller = new AbortController();
     const load = async () => {
-      setFeaturedBusy(true); setFeaturedError(""); setFeaturedResult(null);
+      setFeaturedBusy(true); setFeaturedError("");
       try {
-        const body = { sports: [featuredSport], start, end, venue, legs: 2, minReferencePayout: 3, anchorGameId: featuredGame.id };
+        const body = { sports: [featuredSport], start, end, venue, legs: 2, minReferencePayout: 3, anchorGameIds };
         const response = await fetch("/api/combos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), cache: "no-store", signal: controller.signal });
         const data = await json(response);
         if (!response.ok) throw new Error(message(data, "Could not prepare game combos."));
-        setFeaturedResult(data as ComboResult);
+        const results = (data as { gameCombos?: Record<string, ComboResult> }).gameCombos;
+        if (!results || typeof results !== "object") throw new Error("The combo service returned an invalid game slate.");
+        setFeaturedResults((current) => ({ ...current, ...Object.fromEntries(Object.entries(results).map(([gameId, result]) => {
+          const game = visibleFeaturedGames.find((item) => item.id === gameId);
+          return [game ? featuredResultKey(game) : gameId, result];
+        })) }));
       } catch (error) {
         if (!controller.signal.aborted) setFeaturedError(error instanceof Error ? error.message : "Could not prepare game combos.");
       } finally { if (!controller.signal.aborted) setFeaturedBusy(false); }
     };
     void load();
     return () => controller.abort();
-  }, [view, featuredSport, featuredGame?.id, venue, start, end, catalog?.fetchedAt]);
+  }, [view, featuredSport, venue, start, end, catalog?.fetchedAt, featuredLimit, featuredResults, visibleFeaturedGames, featuredResultKey]);
   const combo = result?.combos[comboIndex] ?? null;
   const dataFresh = fresh(catalog?.fetchedAt);
   const playerMarkets = (catalog?.markets ?? []).filter((market) => market.category === "player-prop");
@@ -297,15 +305,30 @@ export default function HomePage() {
           <MarketsPanel markets={markets} total={catalog?.markets.length ?? 0} search={search} setSearch={setSearch} limit={marketLimit} setLimit={setMarketLimit} loading={catalogBusy} error={catalogError} compact onRefresh={refresh} />
         </>}
         {view === "game-combos" && <>
-          <Intro title="Combos by game." copy="Ready-made research candidates for each upcoming matchup in the five listed sports." aside={catalog?.fetchedAt ? "Snapshot " + when(catalog.fetchedAt) : "Awaiting data"} />
-          <div className="featured-sports" role="group" aria-label="Choose sport">{SPORTS.map((sport) => <button key={sport} className={"select-chip" + (featuredSport === sport ? " selected" : "")} aria-pressed={featuredSport === sport} onClick={() => { setFeaturedSport(sport); setFeaturedGameId(null); }}>{sport}<span>{games.filter((game) => game.sport === sport && game.status === "scheduled").length}</span></button>)}</div>
-          <div className="featured-layout">
-            <section className="panel featured-game-list"><div className="section-heading"><h2>{featuredSport} games</h2><span>{start} to {end}</span></div>{featuredGames.length ? <div className="game-list">{featuredGames.map((game) => <button key={game.id} className={"game-list-item" + (featuredGame?.id === game.id ? " selected" : "")} onClick={() => setFeaturedGameId(game.id)}><span className="sport-square">{game.sport.slice(0, 2)}</span><span><strong>{game.title}</strong><small>{when(game.startsAt)}</small></span><ArrowRight size={17} /></button>)}</div> : <Empty icon={CalendarDays} title={catalogBusy ? "Checking schedules" : "No upcoming games in this sport"} copy={catalogError || "Try another sport or extend the dates in the generator."} />}</section>
-            <section className="panel featured-combos"><div className="section-heading"><div><h2>{featuredGame?.title ?? "Select a game"}</h2>{featuredGame && <p>{featuredSport} · {when(featuredGame.startsAt)} · automatically generated</p>}</div><button className="text-action" onClick={refresh} disabled={catalogBusy}><RefreshCw size={15} /> Refresh</button></div>
-              {venue === "polymarket-global" ? <Empty icon={Info} title="Choose a supported venue" copy="Select Kalshi or Polymarket US in the generator to prepare game combos." action={<button className="secondary-button" onClick={() => navigate("generator")}>Choose venue <ArrowRight size={16} /></button>} /> : featuredBusy ? <Empty icon={Activity} title="Preparing game combos" copy="Checking current asks, schedule matches, and the 3× reference target." /> : featuredError ? <div className="inline-alert error"><CircleAlert size={17} />{featuredError}</div> : featuredGame && featuredResult?.combos.length ? <div className="featured-combo-list">{featuredResult.combos.map((item) => <article className="featured-combo" key={item.id}><div className="featured-combo-top"><strong>#{item.rank} · {multiple(item.referenceGrossMultiplier)} reference</strong><span>{pct(item.probability)} market-implied</span></div><div className="featured-combo-legs">{item.legs.map((leg) => <div key={leg.id}><span>{leg.selection}</span><small>{legEvent(leg, catalog?.games ?? [])} · {cents(leg.entryPrice)} ask</small></div>)}</div><div className="featured-combo-actions"><span>2 verified games · no combo quote</span><button className="secondary-button" onClick={() => saveCombo(item, "research")}><Bookmark size={15} /> Save</button></div></article>)}</div> : <Empty icon={FileSearch} title={featuredGame ? "No qualifying combo for this game" : "No upcoming game in this sport"} copy={featuredGame ? featuredResult?.warnings.at(-1) || "A 3× payout reference requires two verified games with current asks. Try another matchup." : "Choose another sport or adjust the date range in the generator."} />}
-              <p className="featured-note">Each candidate includes one leg from the selected game and one from another verified game in the same sport. The reference multiplier multiplies standalone asks; actual combo pricing and the true joint win chance are unknown.</p>
-            </section>
+          <Intro title="Pre-generated combos by game." copy="Browse matchup-by-matchup research candidates across every supported sport. Each slate is prepared from current, schedule-matched contracts." aside={catalog?.fetchedAt ? "Snapshot " + when(catalog.fetchedAt) : "Awaiting data"} />
+          <div className="featured-toolbar panel">
+            <div className="featured-date-fields"><label>From<input type="date" value={start} max={end} onChange={(event) => setStart(event.target.value)} /></label><label>Through<input type="date" value={end} min={start} onChange={(event) => setEnd(event.target.value)} /></label></div>
+            <div className="venue-options" role="group" aria-label="Combo venue">{VENUES.map((item) => <button key={item.id} className={"select-chip venue-chip" + (venue === item.id ? " selected" : "")} aria-pressed={venue === item.id} onClick={() => setVenue(item.id)}>{item.label}</button>)}</div>
+            <button className="secondary-button" onClick={() => { setFeaturedResults({}); setFeaturedError(""); setFeaturedLimit(24); refresh(); }} disabled={catalogBusy || featuredBusy}><RefreshCw size={15} className={featuredBusy ? "spin" : ""} /> Refresh slate</button>
           </div>
+          <div className="featured-sports" role="group" aria-label="Choose sport">{SPORTS.map((sport) => <button key={sport} className={"select-chip" + (featuredSport === sport ? " selected" : "")} aria-pressed={featuredSport === sport} onClick={() => { setFeaturedSport(sport); setFeaturedLimit(24); setFeaturedError(""); }}>{sport}<span>{games.filter((game) => game.sport === sport && game.status === "scheduled").length}</span></button>)}</div>
+          {venue === "polymarket-global" ? <section className="panel featured-empty"><Empty icon={Info} title="Choose a supported venue" copy="Global Polymarket markets are read-only. Pick Kalshi or Polymarket US to prepare and save game combos." /></section> : featuredError ? <div className="inline-alert error"><CircleAlert size={17} />{featuredError}</div> : catalogError ? <div className="inline-alert error"><CircleAlert size={17} />{catalogError}</div> : visibleFeaturedGames.length ? <>
+            <div className="slate-heading"><div><h2>{featuredSport} matchup slate</h2><p>{Math.min(featuredLimit, featuredGames.length)} of {featuredGames.length} scheduled games · one candidate per game</p></div><span className="slate-target">2 legs · 3× reference target</span></div>
+            <div className="game-combo-grid">{visibleFeaturedGames.map((game) => {
+              const gameResult = featuredResults[featuredResultKey(game)];
+              const item = gameResult?.combos[0];
+              return <article className="panel game-combo-card" key={game.id}>
+                <header className="game-combo-header"><div><span className="game-combo-time">{when(game.startsAt)}</span><h3>{game.title}</h3></div><span className="sport-square">{game.sport}</span></header>
+                {featuredBusy && !gameResult ? <div className="game-combo-loading"><Activity size={17} className="spin" /> Preparing market matches…</div> : item ? <>
+                  <div className="game-combo-metrics"><div><small>Market-implied combo chance</small><strong>{pct(item.probability)}</strong></div><div><small>Standalone-ask reference</small><strong>{multiple(item.referenceGrossMultiplier)}</strong></div></div>
+                  <div className="featured-combo-legs">{item.legs.map((leg) => <div key={leg.id} className={leg.gameId === game.id ? "anchor-leg" : "support-leg"}><span>{leg.selection}</span><small>{leg.gameId === game.id ? "This matchup" : legEvent(leg, catalog?.games ?? [])} · {cents(leg.entryPrice)} standalone ask</small></div>)}</div>
+                  <div className="game-combo-footer"><span>2 verified games · no combo quote</span><button className="secondary-button" onClick={() => saveCombo(item, "research")}><Bookmark size={15} /> Save</button></div>
+                </> : gameResult ? <div className="game-combo-empty"><FileSearch size={18} /><div><strong>No qualifying candidate</strong><p>{gameResult.warnings.at(-1) || "No two-leg combination met the selected screen."}</p></div></div> : <div className="game-combo-loading"><Activity size={17} className="spin" /> Preparing market matches…</div>}
+              </article>;
+            })}</div>
+            {featuredGames.length > featuredLimit && <div className="slate-more"><button className="secondary-button" onClick={() => setFeaturedLimit((limit) => Math.min(limit + 24, featuredGames.length))} disabled={featuredBusy}>Show next {Math.min(24, featuredGames.length - featuredLimit)} games <ArrowRight size={16} /></button></div>}
+          </> : <section className="panel featured-empty"><Empty icon={CalendarDays} title={catalogBusy ? "Checking schedules" : "No upcoming games in this sport"} copy="Try another sport or widen the date range above." /></section>}
+          <p className="featured-note">Candidates use normalized standalone market prices as a rough screen. The multiplier is not an executable combo quote, the listed chance is not an independent forecast, and no positive edge or winning result is guaranteed.</p>
         </>}
         {view === "dashboard" && <>
           <Intro title="Sports market overview." copy="Real schedules, contract availability, and your latest research in one place." aside={when(new Date().toISOString(), false)} />

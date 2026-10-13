@@ -8,7 +8,7 @@ The optimizer compares binary market-implied probabilities from the available qu
 
 These values are a ranking proxy, not a trained sports forecast. The reference multiplier is the reciprocal of the product of standalone asks; it is **not** an executable combo quote, a promised payout, or evidence of positive expected value. The displayed Frechet bounds describe possible dependence among the quoted marginal probabilities; they do not cover errors in those market probabilities. Distinct game outcomes may still be correlated, including repeat teams on different dates. No trades are placed.
 
-The **Game combos** page automatically prepares two-leg research combinations anchored to a selected matchup for each listed sport. Its second leg comes from a different verified game in the same sport because a same-game joint probability and combo price are not available. The page shows a no-qualifying-combo state when the market or schedule evidence is insufficient.
+The **Game combos** page prepares a two-leg research candidate for each scheduled matchup across MLB, NFL, NCAAF, NBA and NCAAB. It shows 24 games at a time and lets the user expand longer schedules. Every candidate includes one leg from its displayed matchup and one from a different verified game in the same sport because a same-game joint probability and combo price are not available. The page shows a no-qualifying-combo state when the market or schedule evidence is insufficient.
 
 ## Data and limits
 

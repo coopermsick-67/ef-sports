@@ -251,6 +251,8 @@ test("POST handler validates dates, sports, and the ten-leg maximum", async () =
     { ...request, legs: 11 },
     { ...request, legs: 2.5 },
     { ...request, maxSpread: 2 },
+    { ...request, anchorGameId: "game-one", anchorGameIds: ["game-two"] },
+    { ...request, anchorGameIds: Array.from({ length: 49 }, (_, index) => `game-${index}`) },
   ]) {
     const response = await POST(new Request("http://localhost/api/combos", { method: "POST", body: JSON.stringify(invalid) }));
     assert.equal(response.status, 400);
@@ -271,6 +273,26 @@ test("POST returns ranked research combinations and explicitly no executable quo
   assert.equal(result.combos[0].executableQuote, null);
   assert.equal(result.combos[0].hypothetical, true);
   assert.equal(result.diagnostics.ranking, "payout-constrained-market-proxy");
+});
+
+test("POST prepares a bounded slate of one anchored combo per requested game", async () => {
+  const current = new Date().toISOString();
+  fixtureProvider.setCatalog(catalog([
+    market("first", 0.72, { fetchedAt: current }),
+    market("second", 0.66, { fetchedAt: current }),
+    market("third", 0.61, { fetchedAt: current }),
+  ]));
+  const response = await POST(new Request("http://localhost/api/combos", {
+    method: "POST",
+    body: JSON.stringify({ ...request, sports: ["MLB"], minReferencePayout: 1, anchorGameIds: ["game-first", "game-second"] }),
+  }));
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.deepEqual(Object.keys(result.gameCombos).sort(), ["game-first", "game-second"]);
+  for (const gameId of ["game-first", "game-second"]) {
+    assert.equal(result.gameCombos[gameId].combos.length, 1);
+    assert.ok(result.gameCombos[gameId].combos[0].legs.some((leg) => leg.gameId === gameId));
+  }
 });
 
 test("POST provider failures and invalid JSON never return fabricated selections", async () => {
