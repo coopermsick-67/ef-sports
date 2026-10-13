@@ -107,6 +107,9 @@ export default function HomePage() {
   const [notice, setNotice] = useState("");
 
   const validDates = Boolean(start && end && start <= end);
+  const catalogSportsKey = (view === "game-combos"
+    ? [featuredSport]
+    : sports.length ? sports : [featuredSport]).join(",");
   const refresh = useCallback(() => setRefreshIndex((n) => n + 1), []);
   const navigate = (next: View) => { setView(next); setMenuOpen(false); window.scrollTo({ top: 0, behavior: "smooth" }); };
   useEffect(() => {
@@ -115,7 +118,7 @@ export default function HomePage() {
     const timer = window.setTimeout(async () => {
       if (!validDates) { setCatalog(null); setCatalogError("Choose a valid date range."); setCatalogBusy(false); return; }
       setCatalogBusy(true); setCatalogError("");
-      const params = new URLSearchParams({ sports: (sports.length ? sports : [...SPORTS]).join(","), start, end, venue });
+      const params = new URLSearchParams({ sports: catalogSportsKey, start, end, venue });
       try {
         const response = await fetch("/api/catalog?" + params.toString(), { cache: "no-store", signal: controller.signal });
         const data = await json(response);
@@ -130,7 +133,7 @@ export default function HomePage() {
       } finally { if (active) setCatalogBusy(false); }
     }, 150);
     return () => { active = false; controller.abort(); window.clearTimeout(timer); };
-  }, [sports, start, end, venue, refreshIndex, validDates]);
+  }, [catalogSportsKey, start, end, venue, refreshIndex, validDates]);
   useEffect(() => {
     let active = true;
     (async () => {
@@ -236,7 +239,7 @@ export default function HomePage() {
       setFeaturedBusy(true); setFeaturedError("");
       try {
         const requestSlate = async (sourceVenue: Venue) => {
-          const body = { sports: [...SPORTS], start, end, venue: sourceVenue, legs: 2, anchorGameIds };
+          const body = { sports: [featuredSport], start, end, venue: sourceVenue, legs: 2, anchorGameIds };
           const response = await fetch("/api/combos", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), cache: "no-store", signal: controller.signal });
           const data = await json(response);
           if (!response.ok) throw new Error(message(data, "Could not prepare game combos."));
@@ -337,7 +340,7 @@ export default function HomePage() {
             })}</div>
             {featuredGames.length > featuredLimit && <div className="slate-more"><button className="secondary-button" onClick={() => setFeaturedLimit((limit) => Math.min(limit + 24, featuredGames.length))} disabled={featuredBusy}>Show next {Math.min(24, featuredGames.length - featuredLimit)} games <ArrowRight size={16} /></button></div>}
           </> : <section className="panel featured-empty"><Empty icon={CalendarDays} title={catalogBusy ? "Checking schedules" : "No upcoming games in this sport"} copy="Try another sport or widen the date range above." /></section>}
-          <p className="featured-note">Each matchup is paired with the strongest available market from another scheduled game across all supported sports. If Kalshi has no eligible pair, Polymarket US is checked as a fallback. Leg venues are shown separately; these are research estimates, not calibrated forecasts or executable combo quotes.</p>
+          <p className="featured-note">Each matchup is paired with the strongest available market from another scheduled or live game in the selected sport. If Kalshi has no eligible pair, Polymarket US is checked as a fallback. Leg venues are shown separately; these are research estimates, not calibrated forecasts or executable combo quotes.</p>
         </>}
         {view === "dashboard" && <>
           <Intro title="Sports market overview." copy="Real schedules, contract availability, and your latest research in one place." aside={when(new Date().toISOString(), false)} />
